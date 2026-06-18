@@ -525,18 +525,30 @@ def purchase_recommendation(row, trend=None):
     should_buy = shortage_risk or price_opportunity
     if not should_buy:
         finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
+        if trend == "BAIXA":
+            action = (
+                f"Aguardar provável baixa de preço; cobertura suficiente para {coverage:.1f} dia(s). "
+                f"Reavaliar em {days_until_buy} dia(s).{finance_note}"
+            )
+            reason = "Aguardar baixa provável"
+        else:
+            action = f"Não comprar agora; cobertura suficiente. Reavaliar em {days_until_buy} dia(s).{finance_note}"
+            reason = "Cobertura suficiente"
         return {
             "volume": 0,
-            "action": f"Não comprar agora; cobertura suficiente. Reavaliar em {days_until_buy} dia(s).{finance_note}",
+            "action": action,
             "coverage": coverage,
             "trend": consumption_trend,
             "strategy": strategy,
             "should_buy": "Não",
             "when": f"Em {days_until_buy} dia(s)",
-            "reason": "Cobertura suficiente",
+            "reason": reason,
         }
 
-    target_stock = min(capacity, adjusted_vmd * target_days)
+    if trend == "BAIXA" and shortage_risk:
+        target_stock = min(capacity, adjusted_vmd * reorder_point_days)
+    else:
+        target_stock = min(capacity, adjusted_vmd * target_days)
     raw_volume = max(target_stock - stock, 0)
     rounded_volume = round_to_truck_compartment(raw_volume, headroom)
     if rounded_volume == 0:
@@ -551,11 +563,20 @@ def purchase_recommendation(row, trend=None):
             "reason": "Sem lote logístico",
         }
 
-    reason = "Risco de falta" if shortage_risk else "Alta prevista: comprar antes do aumento"
+    if shortage_risk and trend == "BAIXA":
+        reason = "Comprar mínimo e aguardar baixa"
+    elif shortage_risk:
+        reason = "Risco de falta"
+    else:
+        reason = "Alta prevista: comprar antes do aumento"
     finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
+    if reason == "Comprar mínimo e aguardar baixa":
+        action = f"{reason}. Comprar só segurança logística para não faltar e esperar preço melhor.{finance_note}"
+    else:
+        action = f"{reason}. Comprar para repor até {target_days} dia(s) de cobertura ajustada.{finance_note}"
     return {
         "volume": rounded_volume,
-        "action": f"{reason}. Comprar para repor até {target_days} dia(s) de cobertura ajustada.{finance_note}",
+        "action": action,
         "coverage": coverage,
         "trend": consumption_trend,
         "strategy": strategy,
@@ -609,7 +630,11 @@ def build_weekly_receiving_schedule(exec_df):
         & (exec_df["Comprar?"] == "Sim")
     ].copy()
 
-    reason_order = {"Risco de falta": 0, "Alta prevista: comprar antes do aumento": 1}
+    reason_order = {
+        "Risco de falta": 0,
+        "Comprar mínimo e aguardar baixa": 1,
+        "Alta prevista: comprar antes do aumento": 2,
+    }
     candidates["Ordem Motivo"] = candidates["Motivo"].map(reason_order).fillna(5)
     candidates = candidates.sort_values(
         ["Ordem Motivo", "Cobertura (dias)", "Prazo Financeiro (dias)", "Posto", "Produto"],
@@ -1002,12 +1027,12 @@ def render_market_signal(market):
     trend = market["trend"]
     if trend == "ALTA":
         css = "signal-up"
-        title = "📈 Tendência de ALTA: compra imediata recomendada"
-        text = "Complete os tanques com o volume máximo suportado para travar preço antes de novo repasse em Suape."
+        title = "📈 Tendência de ALTA: avaliar compra antes do aumento"
+        text = "Antecipe somente os produtos com cobertura dentro da janela econômica ou risco de falta, respeitando espaço de tanque e logística."
     elif trend == "BAIXA":
         css = "signal-down"
-        title = "📉 Tendência de BAIXA: adiar pedido quando possível"
-        text = "Compre apenas o volume crítico de segurança: 2 dias de lead-time Vibra mais 1 dia de margem operacional."
+        title = "📉 Tendência de BAIXA: esperar quando houver cobertura"
+        text = "Se a cobertura permitir, adie para capturar preço menor. Se houver risco de falta, compre só o mínimo de segurança."
     else:
         css = "signal-neutral"
         title = "➖ Tendência NEUTRA: manter disciplina de cobertura"
