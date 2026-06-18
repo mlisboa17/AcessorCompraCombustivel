@@ -1251,6 +1251,51 @@ def filter_table(df, key, label="Filtros da planilha"):
     return filtered
 
 
+def filter_weekly_schedule(schedule):
+    if schedule.empty:
+        return schedule
+
+    filtered = schedule.copy()
+    filtered["_DataFiltro"] = pd.to_datetime(filtered["Data"], format="%d/%m/%Y", errors="coerce")
+    start = datetime.now().date() + timedelta(days=1)
+    end = start + timedelta(days=2)
+    filtered = filtered[
+        filtered["_DataFiltro"].dt.date.between(start, end)
+    ].copy()
+
+    st.markdown("##### Filtros rápidos")
+    c1, c2, c3 = st.columns([1.2, 1.2, 1])
+    station_options = sorted(filtered["Posto"].dropna().unique().tolist())
+    product_options = sorted(filtered["Produto"].dropna().unique().tolist())
+    selected_stations = c1.multiselect("Postos", station_options, default=station_options, key="quick_schedule_stations")
+    selected_products = c2.multiselect("Produtos", product_options, default=product_options, key="quick_schedule_products")
+
+    if not filtered.empty:
+        min_qty = int(filtered["Comprar (L)"].min())
+        max_qty = int(filtered["Comprar (L)"].max())
+    else:
+        min_qty = max_qty = 0
+    if min_qty == max_qty:
+        qty_range = (min_qty, max_qty)
+        c3.caption(f"Quantidade: {liters(min_qty)}")
+    else:
+        qty_range = c3.slider(
+            "Quantidade (L)",
+            min_value=min_qty,
+            max_value=max_qty,
+            value=(min_qty, max_qty),
+            step=TRUCK_COMPARTMENT_LITERS,
+            key="quick_schedule_qty",
+        )
+
+    filtered = filtered[
+        filtered["Posto"].isin(selected_stations)
+        & filtered["Produto"].isin(selected_products)
+        & filtered["Comprar (L)"].between(qty_range[0], qty_range[1])
+    ].copy()
+    return filtered.drop(columns=["_DataFiltro"], errors="ignore")
+
+
 def render_mobile_recommendation_cards(exec_df, weekly_schedule):
     st.markdown("#### Resumo rápido")
     source = exec_df[exec_df["Comprar?"] == "Sim"].copy()
@@ -1518,7 +1563,8 @@ def render_main_panel(read_only=False):
     if weekly_schedule.empty:
         st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
     else:
-        weekly_schedule_view = filter_table(weekly_schedule, "weekly_schedule", "Filtros da programação semanal")
+        st.caption("Mostrando por padrão os próximos 3 dias, com filtros por posto, produto e quantidade.")
+        weekly_schedule_view = filter_weekly_schedule(weekly_schedule)
         st.dataframe(
             weekly_schedule_view,
             hide_index=True,
