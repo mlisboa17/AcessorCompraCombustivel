@@ -28,6 +28,7 @@ st.set_page_config(
 
 
 TRUCK_COMPARTMENT_LITERS = 5000
+DATA_VERSION = "pdf-litragem-2026-06-18"
 PRODUCTS = [
     "Gasolina Comum",
     "Etanol Comum",
@@ -55,16 +56,16 @@ USERS = {
         "station": None,
     },
     "gerente_recife": {
-        "name": "Gerente Recife",
+        "name": "Gerente Casa Caiada",
         "role": "Gerente",
         "password_hash": hashlib.sha256("recife123".encode()).hexdigest(),
-        "station": "Posto Boa Viagem",
+        "station": "AP Casa Caiada",
     },
     "gerente_olinda": {
-        "name": "Gerente Olinda",
+        "name": "Gerente VIP",
         "role": "Gerente",
         "password_hash": hashlib.sha256("olinda123".encode()).hexdigest(),
-        "station": "Posto Olinda",
+        "station": "Posto VIP",
     },
 }
 
@@ -217,6 +218,10 @@ def liters(value):
 def normalize_product(value):
     raw = str(value or "").strip().upper()
     raw = re.sub(r"\s+", " ", raw)
+    raw = raw.replace(".", "")
+    raw = raw.replace(" GRID", "")
+    raw = raw.replace(" PETROBRAS PO", "")
+    raw = raw.replace(" C ADIT", "")
     aliases = {
         "GASOLINA": "Gasolina Comum",
         "GASOLINA COMUM": "Gasolina Comum",
@@ -231,10 +236,14 @@ def normalize_product(value):
         "GASOLINA PODIUM": "Gasolina Podium",
         "PODIUM": "Gasolina Podium",
         "DIESEL": "Diesel Comum",
+        "DIESEL S10": "Diesel Comum",
         "DIESEL COMUM": "Diesel Comum",
+        "DIESEL S10 COMUM": "Diesel Comum",
         "S500": "Diesel Comum",
         "S10": "Diesel Aditivado",
+        "DIESEL B S10 ADITIVADO": "Diesel Aditivado",
         "DIESEL ADITIVADO": "Diesel Aditivado",
+        "GASOLINA PREMIUM": "Gasolina Podium",
     }
     return aliases.get(raw, str(value or "").strip().title())
 
@@ -249,36 +258,39 @@ def round_to_truck_compartment(volume, headroom):
 
 def default_network():
     return {
-        "Posto Boa Viagem": {
-            "city": "Recife",
-            "tanks": {
-                "Gasolina Comum": {"capacity": 45000.0, "stock": 23500.0, "vmd": 5200.0},
-                "Etanol Comum": {"capacity": 30000.0, "stock": 11000.0, "vmd": 2800.0},
-                "Diesel Comum": {"capacity": 40000.0, "stock": 18400.0, "vmd": 3600.0},
-            },
-        },
-        "Posto Olinda": {
+        "AP Casa Caiada": {
             "city": "Olinda",
             "tanks": {
-                "Gasolina Comum": {"capacity": 35000.0, "stock": 14200.0, "vmd": 3900.0},
-                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 6200.0, "vmd": 900.0},
-                "Etanol Comum": {"capacity": 25000.0, "stock": 8200.0, "vmd": 2100.0},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 552.5},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1122.5},
             },
         },
-        "Posto Caruaru": {
-            "city": "Caruaru",
+        "Posto Doze Filial II": {
+            "city": "Pernambuco",
             "tanks": {
-                "Gasolina Comum": {"capacity": 40000.0, "stock": 25100.0, "vmd": 4300.0},
-                "Etanol Comum": {"capacity": 30000.0, "stock": 14800.0, "vmd": 2600.0},
-                "Diesel Comum": {"capacity": 45000.0, "stock": 22600.0, "vmd": 4100.0},
-                "Diesel Aditivado": {"capacity": 20000.0, "stock": 9100.0, "vmd": 1200.0},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 155.1},
+                "Diesel Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 459.3},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1073.0},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1842.1},
             },
         },
-        "Posto Casa Caiada": {
-            "city": "Olinda",
+        "Posto Enseada do Norte": {
+            "city": "Pernambuco",
             "tanks": {
-                "Gasolina Comum": {"capacity": 30000.0, "stock": 12000.0, "vmd": 2500.0},
-                "Etanol Comum": {"capacity": 20000.0, "stock": 7000.0, "vmd": 1600.0},
+                "Gasolina Podium": {"capacity": 15000.0, "stock": 0.0, "vmd": 121.3},
+                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 212.3},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 218.7},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1172.0},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 2204.1},
+            },
+        },
+        "Posto VIP": {
+            "city": "Pernambuco",
+            "tanks": {
+                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 80.4},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 120.6},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1125.7},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1946.8},
             },
         },
     }
@@ -287,6 +299,9 @@ def default_network():
 def init_state():
     st.session_state.setdefault("authenticated", False)
     st.session_state.setdefault("user", None)
+    if st.session_state.get("data_version") != DATA_VERSION:
+        st.session_state.network = default_network()
+        st.session_state.data_version = DATA_VERSION
     st.session_state.setdefault("network", default_network())
     st.session_state.setdefault("market_cache", None)
     st.session_state.setdefault("last_market_update", None)
