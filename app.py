@@ -358,6 +358,7 @@ def init_state():
     st.session_state.setdefault("market_cache", None)
     st.session_state.setdefault("last_market_update", None)
     st.session_state.setdefault("sales_trends", {})
+    st.session_state.setdefault("decision_history", [])
     migrate_users()
 
 
@@ -509,6 +510,58 @@ def strategy_target_days(strategy, consumption_trend):
     return 4
 
 
+def delivery_window(stock, capacity, adjusted_vmd, volume):
+    if adjusted_vmd <= 0 or volume <= 0:
+        return {
+            "can_fit_in_days": 0,
+            "runout_in_days": 999,
+            "window": "Sem janela calculável",
+            "latest_day": 0,
+        }
+    headroom = max(capacity - stock, 0)
+    can_fit_in_days = max(math.ceil((volume - headroom) / adjusted_vmd), 0)
+    runout_in_days = max(stock / adjusted_vmd, 0)
+    latest_day = max(math.floor(runout_in_days - 0.5), 0)
+    if can_fit_in_days > latest_day:
+        text = f"Crítica: cabe em {can_fit_in_days} dia(s), mas falta em {runout_in_days:.1f} dia(s)"
+    else:
+        text = f"Pode entregar entre D+{can_fit_in_days} e D+{latest_day}; depois disso pode faltar"
+    return {
+        "can_fit_in_days": can_fit_in_days,
+        "runout_in_days": runout_in_days,
+        "window": text,
+        "latest_day": latest_day,
+    }
+
+
+def proportional_target_days(row, adjusted_vmd, base_target_days):
+    station = row["Posto"]
+    records = network_records([station])
+    coverages = []
+    for _, item in records.iterrows():
+        item_vmd = float(item["VMD (L/dia)"]) * trend_factor(consumption_trend_for(item))
+        if item_vmd > 0:
+            coverages.append(float(item["Estoque Atual (L)"]) / item_vmd)
+    if not coverages:
+        return base_target_days
+    station_average = sum(coverages) / len(coverages)
+    return max(base_target_days, min(max(station_average + 1.5, 3), 7))
+
+
+def purchase_score(coverage, reorder_point_days, trend, reason, payment_term_days, volume):
+    risk_score = max(0, min(45, ((reorder_point_days + 1 - coverage) / max(reorder_point_days + 1, 1)) * 45))
+    price_score = 0
+    if trend == "ALTA":
+        price_score = 25
+    elif trend == "BAIXA":
+        price_score = 5 if reason in ("Risco de falta", "Comprar mínimo e aguardar baixa") else 0
+    else:
+        price_score = 10
+    logistics_score = 15 if volume >= TRUCK_COMPARTMENT_LITERS else 0
+    finance_score = min(max(payment_term_days, 0), 30) / 30 * 15
+    return round(min(risk_score + price_score + logistics_score + finance_score, 100), 0)
+
+
 def purchase_recommendation(row, trend=None):
     capacity = float(row["Capacidade (L)"])
     stock = float(row["Estoque Atual (L)"])
@@ -552,14 +605,18 @@ def purchase_recommendation(row, trend=None):
             "should_buy": "Não",
             "when": f"Em {days_until_buy} dia(s)",
             "reason": reason,
+            "window": "Sem compra agora; cobertura permite aguardar",
+            "score": purchase_score(coverage, reorder_point_days, trend, reason, payment_term_days, 0),
         }
 
+    balanced_target_days = proportional_target_days(row, adjusted_vmd, target_days)
     if trend == "BAIXA" and shortage_risk:
         target_stock = min(capacity, adjusted_vmd * reorder_point_days)
     else:
-        target_stock = min(capacity, adjusted_vmd * target_days)
+        target_stock = min(capacity, adjusted_vmd * balanced_target_days)
     raw_volume = max(target_stock - stock, 0)
     rounded_volume = round_to_truck_compartment(raw_volume, headroom)
+    window = delivery_window(stock, capacity, adjusted_vmd, rounded_volume)
     if rounded_volume == 0:
         return {
             "volume": 0,
@@ -570,6 +627,8 @@ def purchase_recommendation(row, trend=None):
             "should_buy": "Não",
             "when": "Reavaliar",
             "reason": "Sem lote logístico",
+            "window": "Sem compra programada",
+            "score": purchase_score(coverage, reorder_point_days, trend, "Sem lote logístico", payment_term_days, 0),
         }
 
     if shortage_risk and trend == "BAIXA":
@@ -592,6 +651,8 @@ def purchase_recommendation(row, trend=None):
         "should_buy": "Sim",
         "when": "Hoje",
         "reason": reason,
+        "window": window["window"],
+        "score": purchase_score(coverage, reorder_point_days, trend, reason, payment_term_days, rounded_volume),
     }
 
 
@@ -646,8 +707,8 @@ def build_weekly_receiving_schedule(exec_df):
     }
     candidates["Ordem Motivo"] = candidates["Motivo"].map(reason_order).fillna(5)
     candidates = candidates.sort_values(
-        ["Ordem Motivo", "Cobertura (dias)", "Prazo Financeiro (dias)", "Posto", "Produto"],
-        ascending=[True, True, False, True, True],
+        ["Ordem Motivo", "Score", "Cobertura (dias)", "Prazo Financeiro (dias)", "Posto", "Produto"],
+        ascending=[True, False, True, False, True, True],
     )
 
     rows = []
@@ -670,9 +731,11 @@ def build_weekly_receiving_schedule(exec_df):
                 "Comprar (L)": volume,
                 "Compartimentos": int(volume / TRUCK_COMPARTMENT_LITERS),
                 "Autonomia Atual": item["Cobertura (dias)"],
+                "Score": item["Score"],
                 "Prazo Financeiro (dias)": item["Prazo Financeiro (dias)"],
                 "Prioridade": item["Estratégia de Estoque"],
                 "Motivo": item["Motivo"],
+                "Janela de Entrega": item["Janela de Entrega"],
                 "Observação": item["Recomendação"],
             }
         )
@@ -711,7 +774,9 @@ def build_executive_table(df, trend):
                 "Tendência Preço": {"ALTA": "Alta", "BAIXA": "Queda", "NEUTRA": "Estável"}.get(trend, "Estável"),
                 "Estratégia de Estoque": recommendation["strategy"],
                 "Prazo Financeiro (dias)": int(row.get("Prazo Financeiro (dias)", 0)),
+                "Score": recommendation["score"],
                 "Motivo": recommendation["reason"],
+                "Janela de Entrega": recommendation["window"],
                 "Recomendação": recommendation["action"],
                 "Comprar?": recommendation["should_buy"],
                 "Quando": recommendation["when"],
@@ -719,6 +784,120 @@ def build_executive_table(df, trend):
             }
         )
     return pd.DataFrame(rows).sort_values(["Comprar?", "Cobertura (dias)", "Posto", "Produto"], ascending=[False, True, True, True])
+
+
+def build_financial_schedule(weekly_schedule, price_delta):
+    if weekly_schedule.empty:
+        return pd.DataFrame()
+    rows = []
+    for _, row in weekly_schedule.iterrows():
+        arrival = datetime.strptime(row["Data"], "%d/%m/%Y").date()
+        term = int(row.get("Prazo Financeiro (dias)", 0))
+        due_date = arrival + timedelta(days=term)
+        volume = float(row["Comprar (L)"])
+        rows.append(
+            {
+                "Posto": row["Posto"],
+                "Produto": row["Produto"],
+                "Chegada": row["Data"],
+                "Volume (L)": volume,
+                "Prazo (dias)": term,
+                "Vencimento Boleto": due_date.strftime("%d/%m/%Y"),
+                "Impacto Caixa Simulado": round(volume * price_delta, 2),
+                "Melhor Dia para Faturar": row["Data"],
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def render_price_simulator(exec_df, weekly_schedule):
+    with st.expander("Simulador de preço e ganho potencial", expanded=False):
+        c1, c2 = st.columns([1, 2])
+        price_delta = c1.number_input(
+            "Variação prevista por litro (R$)",
+            min_value=-2.0,
+            max_value=2.0,
+            value=0.08,
+            step=0.01,
+            format="%.2f",
+            help="Use valor positivo para alta esperada e negativo para baixa esperada.",
+        )
+        scheduled_volume = weekly_schedule["Comprar (L)"].sum() if not weekly_schedule.empty else 0
+        c2.metric("Resultado potencial da programação", f"R$ {money(scheduled_volume * price_delta)}")
+        if price_delta > 0:
+            st.success("Alta simulada: comprar antes pode proteger margem.")
+        elif price_delta < 0:
+            st.warning("Baixa simulada: se houver cobertura, esperar reduz custo de compra.")
+        else:
+            st.info("Sem variação simulada.")
+
+        sim_df = exec_df[exec_df["Comprar?"] == "Sim"].copy()
+        if not sim_df.empty:
+            sim_df["Resultado Potencial"] = sim_df["Volume"] * price_delta
+            st.dataframe(
+                sim_df[["Posto", "Produto", "Volume", "Tendência Preço", "Motivo", "Resultado Potencial"]],
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Volume": st.column_config.NumberColumn(format="%.0f"),
+                    "Resultado Potencial": st.column_config.NumberColumn(format="R$ %.2f"),
+                },
+            )
+    return price_delta
+
+
+def render_financial_control(weekly_schedule, price_delta):
+    st.markdown("#### Controle financeiro")
+    finance_df = build_financial_schedule(weekly_schedule, price_delta)
+    if finance_df.empty:
+        st.info("Sem compras programadas para projetar boletos e caixa.", icon="💳")
+        return
+    st.dataframe(
+        finance_df,
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Volume (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Impacto Caixa Simulado": st.column_config.NumberColumn(format="R$ %.2f"),
+        },
+    )
+
+
+def render_decision_history(exec_df, weekly_schedule, price_delta):
+    st.markdown("#### Histórico de decisões")
+    c1, c2 = st.columns([1, 3])
+    decision = c1.selectbox("Decisão tomada", ["Aprovar recomendação", "Aguardar", "Comprar parcial", "Revisar manualmente"])
+    notes = c2.text_input("Observação", placeholder="Ex: aguardando tabela Vibra/Suape")
+    if st.button("Registrar decisão da rodada", type="primary"):
+        approved = exec_df[exec_df["Comprar?"] == "Sim"].copy()
+        total_volume = float(approved["Volume"].sum()) if not approved.empty else 0
+        potential_result = total_volume * price_delta
+        st.session_state.decision_history.append(
+            {
+                "Data/Hora": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "Usuário": st.session_state.user.get("username", ""),
+                "Decisão": decision,
+                "Volume Total (L)": total_volume,
+                "Pedidos Programados": len(weekly_schedule),
+                "Resultado Simulado": round(potential_result, 2),
+                "Observação": notes,
+            }
+        )
+        st.success("Decisão registrada no histórico.")
+
+    if st.session_state.decision_history:
+        history_df = pd.DataFrame(st.session_state.decision_history)
+        st.dataframe(
+            history_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Volume Total (L)": st.column_config.NumberColumn(format="%.0f"),
+                "Resultado Simulado": st.column_config.NumberColumn(format="R$ %.2f"),
+            },
+        )
+    else:
+        st.info("Nenhuma decisão registrada nesta sessão.", icon="🧾")
 
 
 def donut_chart(station, station_df):
@@ -1086,6 +1265,55 @@ def render_market_signal(market):
     )
 
 
+def render_market_radar(market):
+    st.markdown("#### Radar de mercado")
+    radar_rows = [
+        {
+            "Fonte": "Brent",
+            "Status": "Automático",
+            "Sinal": market.get("trend_label", "Estável"),
+            "Valor/Delta": f"{money(market.get('brent'))} | {market.get('brent_delta', 0):.2f}%",
+            "Uso na decisão": "Custo internacional",
+        },
+        {
+            "Fonte": "Dólar",
+            "Status": "Automático",
+            "Sinal": market.get("trend_label", "Estável"),
+            "Valor/Delta": f"{money(market.get('usd'))} | {market.get('usd_delta', 0):.2f}%",
+            "Uso na decisão": "Câmbio de combustíveis",
+        },
+        {
+            "Fonte": "ANP",
+            "Status": "Manual / próxima integração",
+            "Sinal": "Acompanhar semanal",
+            "Valor/Delta": "Pesquisa de preços",
+            "Uso na decisão": "Referência regional",
+        },
+        {
+            "Fonte": "Petrobras",
+            "Status": "Manual / próxima integração",
+            "Sinal": "Acompanhar reajustes",
+            "Valor/Delta": "Comunicados",
+            "Uso na decisão": "Probabilidade de repasse",
+        },
+        {
+            "Fonte": "Vibra/Suape",
+            "Status": "Manual / fornecedor",
+            "Sinal": "Conferir tabela",
+            "Valor/Delta": "Preço de faturamento",
+            "Uso na decisão": "Compra real",
+        },
+        {
+            "Fonte": "Notícias",
+            "Status": "Manual / próxima integração",
+            "Sinal": "Monitorar",
+            "Valor/Delta": "Eventos e política",
+            "Uso na decisão": "Risco de alta/baixa",
+        },
+    ]
+    st.dataframe(pd.DataFrame(radar_rows), hide_index=True, use_container_width=True)
+
+
 def render_main_panel(read_only=False):
     station_filter = allowed_station() if read_only else None
     title = "📊 Painel de Consulta" if read_only else "📊 Painel de Compras Inteligente"
@@ -1150,6 +1378,7 @@ def render_main_panel(read_only=False):
     )
     st.caption(market.get("source_detail", ""))
     render_market_signal(market)
+    render_market_radar(market)
 
     st.subheader("Ocupação física dos tanques")
     for station in df["Posto"].drop_duplicates().tolist():
@@ -1159,6 +1388,7 @@ def render_main_panel(read_only=False):
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
     weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
+    price_delta = render_price_simulator(exec_df, weekly_schedule)
 
     st.markdown("#### Programação semanal de recebimento")
     st.caption(
@@ -1181,6 +1411,7 @@ def render_main_panel(read_only=False):
             column_config={
                 "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
                 "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
+                "Score": st.column_config.NumberColumn(format="%.0f"),
                 "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
             },
         )
@@ -1214,9 +1445,12 @@ def render_main_panel(read_only=False):
             "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
             "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
             "Volume": st.column_config.NumberColumn(format="%.0f"),
+            "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
             "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
         },
     )
+    render_financial_control(weekly_schedule, price_delta)
+    render_decision_history(exec_df, weekly_schedule, price_delta)
 
 
 def render_network_admin():
