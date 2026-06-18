@@ -1,4 +1,7 @@
 import hashlib
+import io
+import math
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -10,6 +13,11 @@ try:
 except Exception:
     yf = None
 
+try:
+    from pypdf import PdfReader
+except Exception:
+    PdfReader = None
+
 
 st.set_page_config(
     page_title="Vibra/Suape | Painel de Compras",
@@ -19,11 +27,24 @@ st.set_page_config(
 )
 
 
-PRODUCTS = ["Gasolina", "Etanol", "Diesel"]
+TRUCK_COMPARTMENT_LITERS = 5000
+PRODUCTS = [
+    "Gasolina Comum",
+    "Etanol Comum",
+    "Gasolina Aditivada",
+    "Etanol Aditivado",
+    "Gasolina Podium",
+    "Diesel Comum",
+    "Diesel Aditivado",
+]
 PRODUCT_COLORS = {
-    "Gasolina": "#38bdf8",
-    "Etanol": "#34d399",
-    "Diesel": "#f59e0b",
+    "Gasolina Comum": "#2dd4bf",
+    "Etanol Comum": "#84cc16",
+    "Gasolina Aditivada": "#38bdf8",
+    "Etanol Aditivado": "#22c55e",
+    "Gasolina Podium": "#a78bfa",
+    "Diesel Comum": "#f59e0b",
+    "Diesel Aditivado": "#fb7185",
 }
 
 USERS = {
@@ -193,30 +214,71 @@ def liters(value):
     return f"{float(value):,.0f} L".replace(",", ".")
 
 
+def normalize_product(value):
+    raw = str(value or "").strip().upper()
+    raw = re.sub(r"\s+", " ", raw)
+    aliases = {
+        "GASOLINA": "Gasolina Comum",
+        "GASOLINA COMUM": "Gasolina Comum",
+        "GC": "Gasolina Comum",
+        "ETANOL": "Etanol Comum",
+        "ETANOL COMUM": "Etanol Comum",
+        "ALCOOL": "Etanol Comum",
+        "ÁLCOOL": "Etanol Comum",
+        "GASOLINA ADITIVADA": "Gasolina Aditivada",
+        "GAS ADITIVADA": "Gasolina Aditivada",
+        "ETANOL ADITIVADO": "Etanol Aditivado",
+        "GASOLINA PODIUM": "Gasolina Podium",
+        "PODIUM": "Gasolina Podium",
+        "DIESEL": "Diesel Comum",
+        "DIESEL COMUM": "Diesel Comum",
+        "S500": "Diesel Comum",
+        "S10": "Diesel Aditivado",
+        "DIESEL ADITIVADO": "Diesel Aditivado",
+    }
+    return aliases.get(raw, str(value or "").strip().title())
+
+
+def round_to_truck_compartment(volume, headroom):
+    if volume <= 0 or headroom < TRUCK_COMPARTMENT_LITERS:
+        return 0
+    rounded = math.ceil(volume / TRUCK_COMPARTMENT_LITERS) * TRUCK_COMPARTMENT_LITERS
+    max_load = math.floor(headroom / TRUCK_COMPARTMENT_LITERS) * TRUCK_COMPARTMENT_LITERS
+    return max(0, min(rounded, max_load))
+
+
 def default_network():
     return {
         "Posto Boa Viagem": {
             "city": "Recife",
             "tanks": {
-                "Gasolina": {"capacity": 45000.0, "stock": 23500.0, "vmd": 5200.0},
-                "Etanol": {"capacity": 30000.0, "stock": 11000.0, "vmd": 2800.0},
-                "Diesel": {"capacity": 40000.0, "stock": 18400.0, "vmd": 3600.0},
+                "Gasolina Comum": {"capacity": 45000.0, "stock": 23500.0, "vmd": 5200.0},
+                "Etanol Comum": {"capacity": 30000.0, "stock": 11000.0, "vmd": 2800.0},
+                "Diesel Comum": {"capacity": 40000.0, "stock": 18400.0, "vmd": 3600.0},
             },
         },
         "Posto Olinda": {
             "city": "Olinda",
             "tanks": {
-                "Gasolina": {"capacity": 35000.0, "stock": 14200.0, "vmd": 3900.0},
-                "Etanol": {"capacity": 25000.0, "stock": 8200.0, "vmd": 2100.0},
-                "Diesel": {"capacity": 30000.0, "stock": 7600.0, "vmd": 2800.0},
+                "Gasolina Comum": {"capacity": 35000.0, "stock": 14200.0, "vmd": 3900.0},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 6200.0, "vmd": 900.0},
+                "Etanol Comum": {"capacity": 25000.0, "stock": 8200.0, "vmd": 2100.0},
             },
         },
         "Posto Caruaru": {
             "city": "Caruaru",
             "tanks": {
-                "Gasolina": {"capacity": 40000.0, "stock": 25100.0, "vmd": 4300.0},
-                "Etanol": {"capacity": 30000.0, "stock": 14800.0, "vmd": 2600.0},
-                "Diesel": {"capacity": 45000.0, "stock": 22600.0, "vmd": 4100.0},
+                "Gasolina Comum": {"capacity": 40000.0, "stock": 25100.0, "vmd": 4300.0},
+                "Etanol Comum": {"capacity": 30000.0, "stock": 14800.0, "vmd": 2600.0},
+                "Diesel Comum": {"capacity": 45000.0, "stock": 22600.0, "vmd": 4100.0},
+                "Diesel Aditivado": {"capacity": 20000.0, "stock": 9100.0, "vmd": 1200.0},
+            },
+        },
+        "Posto Casa Caiada": {
+            "city": "Olinda",
+            "tanks": {
+                "Gasolina Comum": {"capacity": 30000.0, "stock": 12000.0, "vmd": 2500.0},
+                "Etanol Comum": {"capacity": 20000.0, "stock": 7000.0, "vmd": 1600.0},
             },
         },
     }
@@ -253,11 +315,6 @@ def login_screen():
                 st.rerun()
             else:
                 st.error("Usuário ou senha inválidos.")
-
-        st.info(
-            "Acessos de teste: sócio `socio` / `suape2026`; gerente Recife `gerente_recife` / `recife123`.",
-            icon="🔐",
-        )
 
 
 def network_records(station_filter=None):
@@ -362,7 +419,20 @@ def purchase_recommendation(row, trend):
         action = "Crítico: comprar hoje"
         volume = max(volume, min(headroom, (vmd * 3) - stock))
 
-    return max(volume, 0), action
+    rounded_volume = round_to_truck_compartment(max(volume, 0), headroom)
+    if rounded_volume == 0 and volume > 0:
+        action = "Aguardar: não fecha 5.000 L"
+    return rounded_volume, action
+
+
+def weekly_priority(autonomy, volume):
+    if autonomy < 2:
+        return "Comprar hoje"
+    if autonomy < 4:
+        return "Comprar na semana"
+    if volume >= TRUCK_COMPARTMENT_LITERS:
+        return "Planejar compra"
+    return "Sem compra"
 
 
 def build_executive_table(df, trend):
@@ -378,6 +448,8 @@ def build_executive_table(df, trend):
                 "Produto": row["Produto"],
                 "Dias de Autonomia": round(float(row["Dias de Autonomia"]), 1),
                 "Volume Recomendado para Compra (L)": round(volume, 0),
+                "Múltiplo Caminhão": f"{TRUCK_COMPARTMENT_LITERS:,} L".replace(",", "."),
+                "Prioridade da Semana": weekly_priority(float(row["Dias de Autonomia"]), volume),
                 "Ação Requerida": action,
             }
         )
@@ -420,6 +492,97 @@ def donut_chart(station, station_df):
         ],
     )
     return fig
+
+
+def extract_text_from_upload(uploaded_file):
+    suffix = uploaded_file.name.lower().split(".")[-1]
+    data = uploaded_file.getvalue()
+    if suffix == "txt":
+        for encoding in ("utf-8", "latin-1", "cp1252"):
+            try:
+                return data.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("Não consegui ler o TXT. Salve em UTF-8 e tente novamente.")
+    if suffix == "pdf":
+        if PdfReader is None:
+            raise ValueError("A biblioteca pypdf não está instalada. Confira o requirements.txt.")
+        reader = PdfReader(io.BytesIO(data))
+        pages = [page.extract_text() or "" for page in reader.pages]
+        return "\n".join(pages)
+    raise ValueError("Envie um arquivo TXT ou PDF.")
+
+
+def parse_station_import_text(text):
+    stations = {}
+    current_station = None
+    current_city = "Pernambuco"
+
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        clean = re.sub(r"\s+", " ", line)
+        upper = clean.upper()
+
+        station_match = re.match(r"^(POSTO|UNIDADE)\s*[:\-]?\s+(.+)$", clean, flags=re.I)
+        city_match = re.match(r"^(CIDADE|MUNICIPIO|MUNICÍPIO)\s*[:\-]?\s+(.+)$", clean, flags=re.I)
+        product_match = re.match(
+            r"^([A-ZÁÉÍÓÚÂÊÔÃÕÇ\s]+?)\s+([\d\.,]+)\s*(L|LTS|LITROS)?(?:\s+VMD\s+([\d\.,]+))?$",
+            upper,
+            flags=re.I,
+        )
+
+        if station_match:
+            current_station = station_match.group(2).strip().title()
+            current_city = "Pernambuco"
+            stations.setdefault(current_station, {"city": current_city, "tanks": {}})
+            continue
+        if city_match and current_station:
+            current_city = city_match.group(2).strip().title()
+            stations[current_station]["city"] = current_city
+            continue
+        if product_match and current_station:
+            product = normalize_product(product_match.group(1))
+            capacity = float(product_match.group(2).replace(".", "").replace(",", "."))
+            vmd = (
+                float(product_match.group(4).replace(".", "").replace(",", "."))
+                if product_match.group(4)
+                else max(capacity / 6, 1)
+            )
+            if product in PRODUCTS:
+                stations[current_station]["tanks"][product] = {
+                    "capacity": capacity,
+                    "stock": 0.0,
+                    "vmd": vmd,
+                }
+            continue
+
+    return {name: payload for name, payload in stations.items() if payload["tanks"]}
+
+
+def merge_imported_stations(imported):
+    for station, payload in imported.items():
+        st.session_state.network.setdefault(station, {"city": payload["city"], "tanks": {}})
+        st.session_state.network[station]["city"] = payload["city"]
+        for product, tank in payload["tanks"].items():
+            existing = st.session_state.network[station]["tanks"].get(product, {})
+            st.session_state.network[station]["tanks"][product] = {
+                "capacity": float(tank["capacity"]),
+                "stock": float(existing.get("stock", 0)),
+                "vmd": float(tank["vmd"]),
+            }
+
+
+def highlight_priority(row):
+    priority = row.get("Prioridade da Semana", "")
+    if priority == "Comprar hoje":
+        return ["background-color: rgba(239, 68, 68, .28); color: #fee2e2; font-weight: 700"] * len(row)
+    if priority == "Comprar na semana":
+        return ["background-color: rgba(245, 158, 11, .24); color: #fef3c7; font-weight: 700"] * len(row)
+    if priority == "Planejar compra":
+        return ["background-color: rgba(56, 189, 248, .18); color: #dbeafe"] * len(row)
+    return [""] * len(row)
 
 
 def header(title, subtitle):
@@ -556,8 +719,27 @@ def render_main_panel(read_only=False):
 
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
+    week_df = exec_df[
+        exec_df["Prioridade da Semana"].isin(["Comprar hoje", "Comprar na semana"])
+        & (exec_df["Volume Recomendado para Compra (L)"] >= TRUCK_COMPARTMENT_LITERS)
+    ].copy()
+    if not week_df.empty:
+        st.markdown("#### Ênfase da semana")
+        for _, row in week_df.head(8).iterrows():
+            st.markdown(
+                f"""
+                <div class="signal-card signal-up">
+                    <div class="signal-title">{row['Prioridade da Semana']} · {row['Posto']} · {row['Produto']}</div>
+                    <p class="signal-text">Comprar <b>{liters(row['Volume Recomendado para Compra (L)'])}</b> em múltiplos de {TRUCK_COMPARTMENT_LITERS:,} L. Autonomia atual: {row['Dias de Autonomia']:.1f} dias.</p>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
+    else:
+        st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
+
     st.dataframe(
-        exec_df,
+        exec_df.style.apply(highlight_priority, axis=1),
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -577,11 +759,16 @@ def render_network_admin():
         with st.form("new_station_form"):
             name = st.text_input("Nome do posto", placeholder="Posto Pina")
             city = st.text_input("Cidade", placeholder="Recife")
-            cols = st.columns(3)
+            selected_products = st.multiselect(
+                "Produtos vendidos neste posto",
+                PRODUCTS,
+                default=["Gasolina Comum", "Etanol Comum"],
+            )
+            cols = st.columns(2)
             capacities = {}
             vmds = {}
-            for i, product in enumerate(PRODUCTS):
-                with cols[i]:
+            for i, product in enumerate(selected_products):
+                with cols[i % 2]:
                     capacities[product] = st.number_input(
                         f"Capacidade {product} (L)", min_value=0.0, value=30000.0, step=1000.0
                     )
@@ -596,6 +783,8 @@ def render_network_admin():
                 st.error("Informe o nome do posto.")
             elif clean_name in st.session_state.network:
                 st.error("Já existe um posto com esse nome.")
+            elif not selected_products:
+                st.error("Selecione pelo menos um produto.")
             else:
                 st.session_state.network[clean_name] = {
                     "city": city.strip() or "Pernambuco",
@@ -610,6 +799,50 @@ def render_network_admin():
                 }
                 st.success("Posto cadastrado.")
                 st.rerun()
+
+    with st.expander("Importar cadastro por TXT ou PDF", expanded=False):
+        st.caption(
+            "Formato simples: `POSTO Casa Caiada`, `CIDADE Olinda`, e uma linha por produto, "
+            "exemplo `GASOLINA 30000 VMD 2500`. Se não informar VMD, o app estima pela capacidade."
+        )
+        st.code(
+            "POSTO Casa Caiada\n"
+            "CIDADE Olinda\n"
+            "GASOLINA 30000 VMD 2500\n"
+            "ETANOL 20000 VMD 1600\n"
+            "\n"
+            "POSTO Piedade\n"
+            "GASOLINA ADITIVADA 15000 VMD 900\n"
+            "DIESEL ADITIVADO 25000 VMD 1800",
+            language="text",
+        )
+        upload_network = st.file_uploader("Arquivo de cadastro TXT ou PDF", type=["txt", "pdf"], key="network_import")
+        if upload_network is not None:
+            try:
+                text = extract_text_from_upload(upload_network)
+                imported = parse_station_import_text(text)
+                if not imported:
+                    st.warning("Não encontrei postos/produtos válidos no arquivo.")
+                else:
+                    preview_rows = []
+                    for station, payload in imported.items():
+                        for product, tank in payload["tanks"].items():
+                            preview_rows.append(
+                                {
+                                    "Posto": station,
+                                    "Cidade": payload["city"],
+                                    "Produto": product,
+                                    "Capacidade (L)": tank["capacity"],
+                                    "VMD (L/dia)": tank["vmd"],
+                                }
+                            )
+                    st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+                    if st.button("Importar cadastro para a rede", type="primary"):
+                        merge_imported_stations(imported)
+                        st.success("Cadastro importado.")
+                        st.rerun()
+            except Exception as exc:
+                st.error(f"Não foi possível importar o cadastro: {exc}")
 
     st.subheader("Editar capacidades, estoque e VMD")
     df = network_records()
@@ -641,11 +874,6 @@ def render_network_admin():
                 "vmd": vmd,
             }
 
-        for station in list(new_network.keys()):
-            for product in PRODUCTS:
-                new_network[station]["tanks"].setdefault(
-                    product, {"capacity": 0.0, "stock": 0.0, "vmd": 0.0}
-                )
         st.session_state.network = new_network
         st.success("Rede atualizada.")
         st.rerun()
@@ -690,14 +918,19 @@ def normalize_sales_columns(df):
         }
     ).copy()
     out["Litros"] = pd.to_numeric(out["Litros"], errors="coerce").fillna(0)
-    out["Produto"] = out["Produto"].astype(str).str.strip().str.title()
+    out["Produto"] = out["Produto"].apply(normalize_product)
     out["Posto"] = out["Posto"].astype(str).str.strip()
     if "Data" in out.columns:
         out["Data"] = pd.to_datetime(out["Data"], errors="coerce")
     return out
 
 
-def apply_sales_upload(df):
+def apply_sales_upload(df, last_30_days=True):
+    if last_30_days and "Data" in df.columns and df["Data"].notna().any():
+        latest = df["Data"].max()
+        cutoff = latest - pd.Timedelta(days=29)
+        df = df[df["Data"].between(cutoff, latest)].copy()
+
     if "Data" in df.columns and df["Data"].notna().any():
         days = df.groupby(["Posto", "Produto"])["Data"].nunique().reset_index(name="dias")
         volume = df.groupby(["Posto", "Produto"])["Litros"].sum().reset_index(name="litros")
@@ -727,12 +960,13 @@ def render_settings_sales():
 
     st.subheader("Upload de relatórios")
     st.caption("Formato esperado: colunas `Posto`, `Produto`, `Litros` ou `Volume`, e opcionalmente `Data`.")
+    last_30_days = st.toggle("Usar somente os últimos 30 dias do relatório", value=True)
     uploaded = st.file_uploader("Arraste um CSV ou Excel de vendas", type=["csv", "xlsx", "xls"])
     if uploaded is not None:
         try:
             raw = read_sales_file(uploaded)
             normalized = normalize_sales_columns(raw)
-            updated, ignored, grouped = apply_sales_upload(normalized)
+            updated, ignored, grouped = apply_sales_upload(normalized, last_30_days=last_30_days)
             st.success(f"VMD recalculada para {updated} combinação(ões) de posto/produto.")
             if ignored:
                 st.warning("Linhas ignoradas por posto/produto não cadastrado: " + "; ".join(ignored[:8]))
