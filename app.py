@@ -28,7 +28,7 @@ st.set_page_config(
 
 
 TRUCK_COMPARTMENT_LITERS = 5000
-DATA_VERSION = "pdf-litragem-2026-06-18"
+DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias"
 PRODUCTS = [
     "Gasolina Comum",
     "Etanol Comum",
@@ -261,36 +261,36 @@ def default_network():
         "AP Casa Caiada": {
             "city": "Olinda",
             "tanks": {
-                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 552.5},
-                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1122.5},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 974.97},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1980.89},
             },
         },
         "Posto Doze Filial II": {
             "city": "Pernambuco",
             "tanks": {
-                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 155.1},
-                "Diesel Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 459.3},
-                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1073.0},
-                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1842.1},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 273.69},
+                "Diesel Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 810.59},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1893.59},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 3250.70},
             },
         },
         "Posto Enseada do Norte": {
             "city": "Pernambuco",
             "tanks": {
-                "Gasolina Podium": {"capacity": 15000.0, "stock": 0.0, "vmd": 121.3},
-                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 212.3},
-                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 218.7},
-                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1172.0},
-                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 2204.1},
+                "Gasolina Podium": {"capacity": 15000.0, "stock": 0.0, "vmd": 214.11},
+                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 374.59},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 385.87},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 2068.20},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 3889.52},
             },
         },
         "Posto VIP": {
             "city": "Pernambuco",
             "tanks": {
-                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 80.4},
-                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 120.6},
-                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1125.7},
-                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1946.8},
+                "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 141.79},
+                "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 212.77},
+                "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 1986.53},
+                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 3435.59},
             },
         },
     }
