@@ -2,7 +2,7 @@ import hashlib
 import io
 import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -450,6 +450,74 @@ def weekly_priority(autonomy, volume):
     return "Sem compra"
 
 
+def next_receiving_days(days=7):
+    start = datetime.now().date() + timedelta(days=1)
+    labels = []
+    for offset in range(days):
+        day = start + timedelta(days=offset)
+        weekday = day.weekday()
+        weekday_names = [
+            "Segunda-feira",
+            "Terça-feira",
+            "Quarta-feira",
+            "Quinta-feira",
+            "Sexta-feira",
+            "Sábado",
+            "Domingo",
+        ]
+        labels.append(
+            {
+                "date": day,
+                "label": f"{weekday_names[weekday]} {day.strftime('%d/%m')}",
+                "operates": weekday != 6,
+            }
+        )
+    return labels
+
+
+def build_weekly_receiving_schedule(exec_df):
+    days = next_receiving_days()
+    operational_days = [day for day in days if day["operates"]]
+    candidates = exec_df[
+        (exec_df["Volume Recomendado para Compra (L)"] >= TRUCK_COMPARTMENT_LITERS)
+        & (exec_df["Prioridade da Semana"].isin(["Comprar hoje", "Comprar na semana", "Planejar compra"]))
+    ].copy()
+
+    priority_order = {"Comprar hoje": 0, "Comprar na semana": 1, "Planejar compra": 2}
+    candidates["Ordem"] = candidates["Prioridade da Semana"].map(priority_order).fillna(9)
+    candidates = candidates.sort_values(["Ordem", "Dias de Autonomia", "Posto", "Produto"])
+
+    rows = []
+    for i, (_, item) in enumerate(candidates.iterrows()):
+        day = operational_days[i % len(operational_days)] if operational_days else days[0]
+        rows.append(
+            {
+                "Chegada Prevista": day["label"],
+                "Data": day["date"].strftime("%d/%m/%Y"),
+                "Posto": item["Posto"],
+                "Produto": item["Produto"],
+                "Comprar (L)": item["Volume Recomendado para Compra (L)"],
+                "Compartimentos": int(item["Volume Recomendado para Compra (L)"] / TRUCK_COMPARTMENT_LITERS),
+                "Autonomia Atual": item["Dias de Autonomia"],
+                "Prioridade": item["Prioridade da Semana"],
+                "Observação": item["Ação Requerida"],
+            }
+        )
+
+    schedule = pd.DataFrame(rows)
+    calendar = pd.DataFrame(
+        [
+            {
+                "Dia": day["label"],
+                "Data": day["date"].strftime("%d/%m/%Y"),
+                "Status Base": "Sem operação" if not day["operates"] else "Operando",
+            }
+            for day in days
+        ]
+    )
+    return schedule, calendar
+
+
 def build_executive_table(df, trend):
     if df.empty:
         return pd.DataFrame()
@@ -734,6 +802,28 @@ def render_main_panel(read_only=False):
 
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
+    weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
+
+    st.markdown("#### Programação semanal de recebimento")
+    st.caption("Janela móvel de 7 dias a partir de amanhã. Domingo aparece como sem operação da base.")
+    st.dataframe(
+        base_calendar,
+        hide_index=True,
+        use_container_width=True,
+    )
+    if weekly_schedule.empty:
+        st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
+    else:
+        st.dataframe(
+            weekly_schedule,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+                "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
+            },
+        )
+
     week_df = exec_df[
         exec_df["Prioridade da Semana"].isin(["Comprar hoje", "Comprar na semana"])
         & (exec_df["Volume Recomendado para Compra (L)"] >= TRUCK_COMPARTMENT_LITERS)
