@@ -202,6 +202,82 @@ def inject_css():
                 color: #bbf7d0;
                 font-weight: 700;
             }
+
+            .mobile-card-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+                gap: 12px;
+                margin: 10px 0 18px 0;
+            }
+
+            .mobile-summary-card {
+                background: rgba(15, 23, 42, .92);
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 14px;
+            }
+
+            .mobile-summary-card h4 {
+                margin: 0 0 8px 0;
+                font-size: 1rem;
+            }
+
+            .mobile-summary-card p {
+                margin: 4px 0;
+                color: #d1d5db;
+                font-size: .9rem;
+            }
+
+            @media (max-width: 640px) {
+                .block-container {
+                    padding-left: .75rem;
+                    padding-right: .75rem;
+                    padding-top: 1rem;
+                }
+
+                h1 {
+                    font-size: 1.55rem;
+                    line-height: 1.2;
+                }
+
+                h2, h3 {
+                    font-size: 1.15rem;
+                }
+
+                .subtitle {
+                    font-size: .9rem;
+                    margin-bottom: 12px;
+                }
+
+                .signal-card {
+                    padding: 12px;
+                    margin: 8px 0 12px 0;
+                }
+
+                .signal-title {
+                    font-size: .98rem;
+                }
+
+                .signal-text {
+                    font-size: .88rem;
+                }
+
+                div[data-testid="stMetric"] {
+                    padding: 10px;
+                }
+
+                div[data-testid="stMetricValue"] {
+                    font-size: 1.25rem;
+                }
+
+                div[data-testid="stDataFrame"] {
+                    max-height: 430px;
+                }
+
+                [data-testid="stSidebar"] {
+                    border-right: 0;
+                }
+            }
         </style>
         """,
         unsafe_allow_html=True,
@@ -1175,6 +1251,42 @@ def filter_table(df, key, label="Filtros da planilha"):
     return filtered
 
 
+def render_mobile_recommendation_cards(exec_df, weekly_schedule):
+    st.markdown("#### Resumo rápido")
+    source = exec_df[exec_df["Comprar?"] == "Sim"].copy()
+    if source.empty:
+        source = exec_df.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(6)
+    else:
+        source = source.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(6)
+
+    if source.empty:
+        st.info("Sem dados para exibir no resumo.", icon="📱")
+        return
+
+    schedule_lookup = {}
+    if not weekly_schedule.empty:
+        for _, item in weekly_schedule.iterrows():
+            schedule_lookup[(item["Posto"], item["Produto"])] = item.get("Chegada Prevista", "-")
+
+    html = ['<div class="mobile-card-grid">']
+    for _, row in source.iterrows():
+        arrival = schedule_lookup.get((row["Posto"], row["Produto"]), row.get("Quando", "-"))
+        volume = liters(row["Volume"]) if float(row["Volume"]) > 0 else "0 L"
+        html.append(
+            f"""
+            <div class="mobile-summary-card">
+                <h4>{row['Posto']} · {row['Produto']}</h4>
+                <p><b>Comprar?</b> {row['Comprar?']} · <b>Volume:</b> {volume}</p>
+                <p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>
+                <p><b>Chegada/Quando:</b> {arrival}</p>
+                <p><b>Motivo:</b> {row['Motivo']}</p>
+            </div>
+            """
+        )
+    html.append("</div>")
+    st.markdown("".join(html), unsafe_allow_html=True)
+
+
 def header(title, subtitle):
     st.markdown('<div class="top-title">', unsafe_allow_html=True)
     st.title(title)
@@ -1338,7 +1450,7 @@ def render_main_panel(read_only=False):
     c3.metric("⚠️ Alertas de Risco", risk_count)
     c4.metric("🌎 Tendência Macro", trend)
 
-    with st.expander("Medição física do dia", expanded=not read_only):
+    with st.expander("Medição física do dia", expanded=False):
         if read_only:
             st.caption("Perfil de consulta. Medições e compras são editadas pelo sócio.")
         edit_df = df[["Posto", "Produto", "Estoque Atual (L)", "Capacidade (L)", "VMD (L/dia)"]].copy()
@@ -1378,28 +1490,31 @@ def render_main_panel(read_only=False):
     )
     st.caption(market.get("source_detail", ""))
     render_market_signal(market)
-    render_market_radar(market)
+    with st.expander("Radar de mercado", expanded=False):
+        render_market_radar(market)
 
-    st.subheader("Ocupação física dos tanques")
-    for station in df["Posto"].drop_duplicates().tolist():
-        station_df = df[df["Posto"] == station].reset_index(drop=True)
-        st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
+    with st.expander("Ocupação física dos tanques", expanded=False):
+        for station in df["Posto"].drop_duplicates().tolist():
+            station_df = df[df["Posto"] == station].reset_index(drop=True)
+            st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
 
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
     weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
     price_delta = render_price_simulator(exec_df, weekly_schedule)
+    render_mobile_recommendation_cards(exec_df, weekly_schedule)
 
     st.markdown("#### Programação semanal de recebimento")
     st.caption(
         f"Janela móvel de 7 dias a partir de amanhã. Domingo não opera. "
         f"Capacidade planejada: {AVAILABLE_TRUCKS_PER_DAY} caminhões de {liters(TRUCK_CAPACITY_LITERS)} por dia."
     )
-    st.dataframe(
-        base_calendar,
-        hide_index=True,
-        use_container_width=True,
-    )
+    with st.expander("Calendário e capacidade da base", expanded=False):
+        st.dataframe(
+            base_calendar,
+            hide_index=True,
+            use_container_width=True,
+        )
     if weekly_schedule.empty:
         st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
     else:
@@ -1435,22 +1550,24 @@ def render_main_panel(read_only=False):
     else:
         st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
 
-    exec_df_view = filter_table(exec_df, "executive_table", "Filtros da saída executiva")
-    st.dataframe(
-        exec_df_view.style.apply(highlight_priority, axis=1),
-        hide_index=True,
-        use_container_width=True,
-        column_config={
-            "Estoque Atual": st.column_config.NumberColumn(format="%.0f"),
-            "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
-            "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
-            "Volume": st.column_config.NumberColumn(format="%.0f"),
-            "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
-            "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
-        },
-    )
-    render_financial_control(weekly_schedule, price_delta)
-    render_decision_history(exec_df, weekly_schedule, price_delta)
+    with st.expander("Tabela executiva completa", expanded=False):
+        exec_df_view = filter_table(exec_df, "executive_table", "Filtros da saída executiva")
+        st.dataframe(
+            exec_df_view.style.apply(highlight_priority, axis=1),
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Estoque Atual": st.column_config.NumberColumn(format="%.0f"),
+                "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
+                "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
+                "Volume": st.column_config.NumberColumn(format="%.0f"),
+                "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
+                "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
+            },
+        )
+    with st.expander("Financeiro e histórico", expanded=False):
+        render_financial_control(weekly_schedule, price_delta)
+        render_decision_history(exec_df, weekly_schedule, price_delta)
 
 
 def render_network_admin():
