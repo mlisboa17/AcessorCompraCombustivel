@@ -1296,6 +1296,87 @@ def filter_weekly_schedule(schedule):
     return filtered.drop(columns=["_DataFiltro"], errors="ignore")
 
 
+def short_weekday(date_text):
+    try:
+        day = datetime.strptime(date_text, "%d/%m/%Y")
+    except Exception:
+        return ""
+    names = ["SEG", "TER", "QUA", "QUI", "SEX", "SAB", "DOM"]
+    return names[day.weekday()]
+
+
+def product_transport_code(product):
+    codes = {
+        "Gasolina Comum": "GC",
+        "Etanol Comum": "ET",
+        "Gasolina Aditivada": "GA",
+        "Etanol Aditivado": "EA",
+        "Gasolina Podium": "PODIUM",
+        "Diesel Comum": "DC",
+        "Diesel Aditivado": "DA",
+    }
+    return codes.get(product, product)
+
+
+def render_transport_order(schedule):
+    st.markdown("#### Ordem para transporte")
+    if schedule.empty:
+        st.info("Sem programação de transporte para exibir.", icon="🚚")
+        return
+
+    source = schedule.copy()
+    station_options = sorted(source["Posto"].dropna().unique().tolist())
+    c1, c2 = st.columns([1.2, 1])
+    selected_station = c1.selectbox("Posto para transporte", station_options, key="transport_station")
+    days_ahead = c2.slider("Dias para enviar", min_value=1, max_value=7, value=3, step=1, key="transport_days")
+
+    start = datetime.now().date()
+    end = start + timedelta(days=days_ahead - 1)
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    view = source[
+        (source["Posto"] == selected_station)
+        & source["_DataFiltro"].dt.date.between(start, end)
+    ].copy()
+
+    if view.empty:
+        st.warning("Esse posto não tem entrega programada dentro do período selecionado.")
+        return
+
+    transport_rows = []
+    text_lines = [selected_station.upper(), ""]
+    for date_text, day_df in view.sort_values(["_DataFiltro", "Produto"]).groupby("Data", sort=False):
+        header = f"> {short_weekday(date_text)} - {date_text[:5]}"
+        text_lines.append(header)
+        for _, row in day_df.iterrows():
+            code = product_transport_code(row["Produto"])
+            volume = int(row["Comprar (L)"])
+            text_lines.append(f"{code} {volume}")
+            transport_rows.append(
+                {
+                    "Posto": selected_station,
+                    "Dia": short_weekday(date_text),
+                    "Data": date_text,
+                    "Produto": row["Produto"],
+                    "Código": code,
+                    "Volume (L)": volume,
+                    "Compartimentos": int(row["Compartimentos"]),
+                }
+            )
+        text_lines.append("")
+        text_lines.append("----------------")
+
+    st.dataframe(
+        pd.DataFrame(transport_rows),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Volume (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Compartimentos": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+    st.text_area("Mensagem para transportador", "\n".join(text_lines).strip(), height=220)
+
+
 def render_mobile_recommendation_cards(exec_df, weekly_schedule):
     st.markdown("#### Resumo rápido")
     source = exec_df[exec_df["Comprar?"] == "Sim"].copy()
@@ -1579,6 +1660,7 @@ def render_main_panel(read_only=False):
                 "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
             },
         )
+        render_transport_order(weekly_schedule)
 
     week_df = exec_df[
         (exec_df["Comprar?"] == "Sim")
