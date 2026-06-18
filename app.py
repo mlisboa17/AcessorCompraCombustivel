@@ -53,6 +53,13 @@ PRODUCT_COLORS = {
     "Diesel Aditivado": "#fb7185",
 }
 
+STATION_COLORS = {
+    "AP Casa Caiada": {"accent": "#38bdf8", "bg": "rgba(56, 189, 248, .14)", "border": "rgba(56, 189, 248, .50)"},
+    "Posto Doze Filial II": {"accent": "#f59e0b", "bg": "rgba(245, 158, 11, .14)", "border": "rgba(245, 158, 11, .50)"},
+    "Posto Enseada do Norte": {"accent": "#22c55e", "bg": "rgba(34, 197, 94, .14)", "border": "rgba(34, 197, 94, .50)"},
+    "Posto VIP": {"accent": "#a78bfa", "bg": "rgba(167, 139, 250, .15)", "border": "rgba(167, 139, 250, .55)"},
+}
+
 USERS = {
     "socio": {
         "name": "Sócio Administrador",
@@ -218,6 +225,37 @@ def inject_css():
                 padding: 14px;
             }
 
+            .station-band {
+                border-radius: 8px;
+                border: 1px solid var(--line);
+                padding: 12px 14px;
+                margin: 12px 0;
+                background: rgba(15, 23, 42, .72);
+            }
+
+            .station-chip {
+                display: inline-flex;
+                align-items: center;
+                gap: 8px;
+                font-weight: 750;
+                font-size: .95rem;
+                margin-bottom: 6px;
+            }
+
+            .station-dot {
+                width: 11px;
+                height: 11px;
+                border-radius: 999px;
+                display: inline-block;
+            }
+
+            .section-kicker {
+                color: var(--muted);
+                font-size: .84rem;
+                margin-top: -4px;
+                margin-bottom: 10px;
+            }
+
             .mobile-summary-card h4 {
                 margin: 0 0 8px 0;
                 font-size: 1rem;
@@ -322,6 +360,26 @@ def money(value, decimals=2):
 
 def liters(value):
     return f"{float(value):,.0f} L".replace(",", ".")
+
+
+def station_style(station):
+    fallback = {"accent": "#94a3b8", "bg": "rgba(148, 163, 184, .12)", "border": "rgba(148, 163, 184, .38)"}
+    return STATION_COLORS.get(station, fallback)
+
+
+def station_badge_html(station):
+    style = station_style(station)
+    return (
+        f'<span class="station-chip">'
+        f'<span class="station-dot" style="background:{style["accent"]};"></span>'
+        f"{html_lib.escape(station)}</span>"
+    )
+
+
+def style_rows_by_station(row):
+    station = row.get("Posto", "")
+    style = station_style(station)
+    return [f"background-color: {style['bg']}; border-left: 4px solid {style['accent']}"] * len(row)
 
 
 def normalize_product(value):
@@ -1199,15 +1257,18 @@ def apply_stock_import(stocks):
 
 
 def highlight_priority(row):
+    station = row.get("Posto", "")
+    station_bg = station_style(station)["bg"]
+    station_accent = station_style(station)["accent"]
     should_buy = row.get("Comprar?", "")
     strategy = row.get("Estratégia de Estoque", "")
     if should_buy == "Sim" and "alto" in strategy:
-        return ["background-color: rgba(239, 68, 68, .28); color: #fee2e2; font-weight: 700"] * len(row)
+        return [f"background-color: rgba(239, 68, 68, .24); color: #fee2e2; font-weight: 700; border-left: 4px solid {station_accent}"] * len(row)
     if should_buy == "Sim":
-        return ["background-color: rgba(245, 158, 11, .24); color: #fef3c7; font-weight: 700"] * len(row)
+        return [f"background-color: rgba(245, 158, 11, .18); color: #fef3c7; font-weight: 700; border-left: 4px solid {station_accent}"] * len(row)
     if "baixo" in strategy:
-        return ["background-color: rgba(56, 189, 248, .18); color: #dbeafe"] * len(row)
-    return [""] * len(row)
+        return [f"background-color: {station_bg}; color: #dbeafe; border-left: 4px solid {station_accent}"] * len(row)
+    return [f"background-color: {station_bg}; border-left: 4px solid {station_accent}"] * len(row)
 
 
 def filter_table(df, key, label="Filtros da planilha"):
@@ -1367,7 +1428,7 @@ def render_transport_order(schedule):
         text_lines.append("----------------")
 
     st.dataframe(
-        pd.DataFrame(transport_rows),
+        pd.DataFrame(transport_rows).style.apply(style_rows_by_station, axis=1),
         hide_index=True,
         use_container_width=True,
         column_config={
@@ -1406,8 +1467,9 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
         buy = html_lib.escape(str(row["Comprar?"]))
         arrival_text = html_lib.escape(f"{arrival['date']} · {arrival['label']}")
         reason = html_lib.escape(str(row["Motivo"]))
+        style = station_style(row["Posto"])
         html_parts.append(
-            '<div class="mobile-summary-card">'
+            f'<div class="mobile-summary-card" style="background:{style["bg"]}; border-color:{style["border"]}; border-left: 5px solid {style["accent"]};">'
             f"<h4>{title}</h4>"
             f"<p><b>Comprar?</b> {buy} · <b>Volume:</b> {volume}</p>"
             f"<p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>"
@@ -1423,6 +1485,21 @@ def header(title, subtitle):
     st.markdown('<div class="top-title">', unsafe_allow_html=True)
     st.title(title)
     st.markdown(f'<p class="subtitle">{subtitle}</p>', unsafe_allow_html=True)
+
+
+def render_station_color_legend(df):
+    stations = df["Posto"].drop_duplicates().tolist() if not df.empty else []
+    if not stations:
+        return
+    chips = []
+    for station in stations:
+        chips.append(station_badge_html(station))
+    st.markdown(
+        '<div class="station-band"><div class="section-kicker">Cores por posto</div>'
+        + " ".join(chips)
+        + "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def allowed_station():
@@ -1581,6 +1658,7 @@ def render_main_panel(read_only=False):
     c2.metric("📆 Cobertura Média", f"{avg_autonomy:.1f} dias")
     c3.metric("⚠️ Alertas de Risco", risk_count)
     c4.metric("🌎 Tendência Macro", trend)
+    render_station_color_legend(df)
 
     with st.expander("Medição física do dia", expanded=False):
         if read_only:
@@ -1621,15 +1699,6 @@ def render_main_panel(read_only=False):
         f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
     )
     st.caption(market.get("source_detail", ""))
-    render_market_signal(market)
-    with st.expander("Radar de mercado", expanded=False):
-        render_market_radar(market)
-
-    with st.expander("Ocupação física dos tanques", expanded=False):
-        for station in df["Posto"].drop_duplicates().tolist():
-            station_df = df[df["Posto"] == station].reset_index(drop=True)
-            st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
-
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
     weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
@@ -1653,7 +1722,7 @@ def render_main_panel(read_only=False):
         st.caption("Mostrando por padrão os próximos 3 dias, com filtros por posto, produto e quantidade.")
         weekly_schedule_view = filter_weekly_schedule(weekly_schedule)
         st.dataframe(
-            weekly_schedule_view,
+            weekly_schedule_view.style.apply(style_rows_by_station, axis=1),
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -1664,6 +1733,16 @@ def render_main_panel(read_only=False):
             },
         )
         render_transport_order(weekly_schedule)
+
+    render_market_signal(market)
+    with st.expander("Radar de mercado", expanded=False):
+        render_market_radar(market)
+
+    with st.expander("Ocupação física dos tanques", expanded=False):
+        for station in df["Posto"].drop_duplicates().tolist():
+            station_df = df[df["Posto"] == station].reset_index(drop=True)
+            st.markdown(station_badge_html(station), unsafe_allow_html=True)
+            st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
 
     week_df = exec_df[
         (exec_df["Comprar?"] == "Sim")
