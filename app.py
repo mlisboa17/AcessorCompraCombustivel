@@ -1311,11 +1311,14 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
     schedule_lookup = {}
     if not weekly_schedule.empty:
         for _, item in weekly_schedule.iterrows():
-            schedule_lookup[(item["Posto"], item["Produto"])] = item.get("Chegada Prevista", "-")
+            schedule_lookup[(item["Posto"], item["Produto"])] = {
+                "label": item.get("Chegada Prevista", "-"),
+                "date": item.get("Data", "-"),
+            }
 
     html = ['<div class="mobile-card-grid">']
     for _, row in source.iterrows():
-        arrival = schedule_lookup.get((row["Posto"], row["Produto"]), row.get("Quando", "-"))
+        arrival = schedule_lookup.get((row["Posto"], row["Produto"]), {"label": row.get("Quando", "-"), "date": "-"})
         volume = liters(row["Volume"]) if float(row["Volume"]) > 0 else "0 L"
         html.append(
             f"""
@@ -1323,7 +1326,7 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
                 <h4>{row['Posto']} · {row['Produto']}</h4>
                 <p><b>Comprar?</b> {row['Comprar?']} · <b>Volume:</b> {volume}</p>
                 <p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>
-                <p><b>Chegada/Quando:</b> {arrival}</p>
+                <p><b>Chegada:</b> {arrival['date']} · {arrival['label']}</p>
                 <p><b>Motivo:</b> {row['Motivo']}</p>
             </div>
             """
