@@ -31,6 +31,7 @@ TRUCK_COMPARTMENT_LITERS = 5000
 TRUCK_CAPACITY_LITERS = 25000
 AVAILABLE_TRUCKS_PER_DAY = 2
 DAILY_DELIVERY_CAPACITY_LITERS = TRUCK_CAPACITY_LITERS * AVAILABLE_TRUCKS_PER_DAY
+MARKET_REFRESH_HOURS = 3
 DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias-prazo-logistica"
 PRODUCTS = [
     "Gasolina Comum",
@@ -457,13 +458,21 @@ def fetch_market_data():
         trend = "NEUTRA"
 
     output["trend"] = trend
+    output["trend_label"] = {"ALTA": "Alta", "BAIXA": "Queda", "NEUTRA": "Estável"}[trend]
     output["source"] = "Yahoo Finance via yfinance"
+    output["source_detail"] = "Brent (BZ=F) e dólar USD/BRL (USDBRL=X). ANP, Petrobras e fornecedores locais ficam como fontes recomendadas para futura integração."
     return output
 
 
 def get_market_data(force=False):
-    if force or st.session_state.market_cache is None:
+    last_update = st.session_state.get("last_market_update_dt")
+    expired = True
+    if last_update:
+        expired = datetime.now() - last_update >= timedelta(hours=MARKET_REFRESH_HOURS)
+
+    if force or expired or st.session_state.market_cache is None:
         st.session_state.market_cache = fetch_market_data()
+        st.session_state.last_market_update_dt = datetime.now()
         st.session_state.last_market_update = datetime.now().strftime("%d/%m/%Y %H:%M")
     return st.session_state.market_cache
 
@@ -626,7 +635,7 @@ def build_weekly_receiving_schedule(exec_df):
     operational_days = [day for day in days if day["operates"]]
     remaining_capacity = {day["date"]: DAILY_DELIVERY_CAPACITY_LITERS for day in operational_days}
     candidates = exec_df[
-        (exec_df["Volume Sugerido (L)"] >= TRUCK_COMPARTMENT_LITERS)
+        (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)
         & (exec_df["Comprar?"] == "Sim")
     ].copy()
 
@@ -643,7 +652,7 @@ def build_weekly_receiving_schedule(exec_df):
 
     rows = []
     for _, item in candidates.iterrows():
-        volume = float(item["Volume Sugerido (L)"])
+        volume = float(item["Volume"])
         day = None
         for candidate_day in operational_days:
             if remaining_capacity[candidate_day["date"]] >= volume:
@@ -698,14 +707,15 @@ def build_executive_table(df, trend):
                 "Estoque Atual": round(float(row["Estoque Atual (L)"]), 0),
                 "Consumo Diário": round(float(row["VMD (L/dia)"]), 1),
                 "Cobertura (dias)": round(float(recommendation["coverage"]), 1),
-                "Tendência": recommendation["trend"],
+                "Tendência Consumo": recommendation["trend"],
+                "Tendência Preço": {"ALTA": "Alta", "BAIXA": "Queda", "NEUTRA": "Estável"}.get(trend, "Estável"),
                 "Estratégia de Estoque": recommendation["strategy"],
                 "Prazo Financeiro (dias)": int(row.get("Prazo Financeiro (dias)", 0)),
                 "Motivo": recommendation["reason"],
                 "Recomendação": recommendation["action"],
                 "Comprar?": recommendation["should_buy"],
-                "Quando Comprar": recommendation["when"],
-                "Volume Sugerido (L)": round(recommendation["volume"], 0),
+                "Quando": recommendation["when"],
+                "Volume": round(recommendation["volume"], 0),
             }
         )
     return pd.DataFrame(rows).sort_values(["Comprar?", "Cobertura (dias)", "Posto", "Produto"], ascending=[False, True, True, True])
@@ -1001,26 +1011,53 @@ def allowed_station():
 
 def render_sidebar():
     user = st.session_state.user
-    st.sidebar.title("⛽ Suprimento PE")
-    st.sidebar.caption(f"{user['name']} | {user['role']}")
+    market = get_market_data()
+    st.sidebar.title("⛽ FuelGuard")
+    st.sidebar.caption("Trader inteligente de combustível")
+    st.sidebar.divider()
+    st.sidebar.markdown(f"**{user['name']}**")
+    st.sidebar.caption(f"Perfil: {user['role']}")
+
+    if user["role"] == "Gerente":
+        stations = user.get("stations", [])
+        st.sidebar.caption("Postos liberados:")
+        st.sidebar.write(", ".join(stations) if stations else "Nenhum posto vinculado")
+    else:
+        st.sidebar.caption(f"Rede: {len(st.session_state.network)} posto(s)")
 
     if user["role"] == "Sócio":
-        pages = [
-            "Painel de Compras",
-            "Cadastro de Postos e Tanques",
-            "Configurações e Vendas",
-        ]
+        page_labels = {
+            "📊 Painel de Compras": "Painel de Compras",
+            "🏪 Postos e Tanques": "Cadastro de Postos e Tanques",
+            "⚙️ Configurações": "Configurações e Vendas",
+        }
     else:
-        pages = ["Painel de Consulta"]
+        page_labels = {"📊 Painel de Consulta": "Painel de Consulta"}
 
-    page = st.sidebar.radio("Navegação", pages, label_visibility="collapsed")
+    st.sidebar.divider()
+    selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
+
+    st.sidebar.divider()
+    st.sidebar.markdown("**Mercado**")
+    st.sidebar.metric("Tendência preço", market.get("trend_label", market["trend"]))
+    st.sidebar.caption(f"Atualizado: {st.session_state.last_market_update or 'pendente'}")
+    st.sidebar.caption(f"Atualização automática: {MARKET_REFRESH_HOURS}h")
+    if st.sidebar.button("Atualizar mercado", use_container_width=True):
+        get_market_data(force=True)
+        st.rerun()
+
+    st.sidebar.divider()
+    st.sidebar.markdown("**Logística**")
+    st.sidebar.caption(f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia")
+    st.sidebar.caption(f"{liters(TRUCK_CAPACITY_LITERS)} por caminhão")
+    st.sidebar.caption(f"Capacidade diária: {liters(DAILY_DELIVERY_CAPACITY_LITERS)}")
 
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.authenticated = False
         st.session_state.user = None
         st.rerun()
 
-    return page
+    return page_labels[selected_label]
 
 
 def render_market_signal(market):
@@ -1107,7 +1144,11 @@ def render_main_panel(read_only=False):
     if m4.button("Atualizar mercado", use_container_width=True):
         get_market_data(force=True)
         st.rerun()
-    st.caption(f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'}")
+    st.caption(
+        f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'} | "
+        f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
+    )
+    st.caption(market.get("source_detail", ""))
     render_market_signal(market)
 
     st.subheader("Ocupação física dos tanques")
@@ -1146,7 +1187,7 @@ def render_main_panel(read_only=False):
 
     week_df = exec_df[
         (exec_df["Comprar?"] == "Sim")
-        & (exec_df["Volume Sugerido (L)"] >= TRUCK_COMPARTMENT_LITERS)
+        & (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)
     ].copy()
     if not week_df.empty:
         st.markdown("#### Ênfase da semana")
@@ -1155,7 +1196,7 @@ def render_main_panel(read_only=False):
                 f"""
                 <div class="signal-card signal-up">
                     <div class="signal-title">{row['Posto']} · {row['Produto']}</div>
-                    <p class="signal-text">Comprar <b>{liters(row['Volume Sugerido (L)'])}</b> uma vez nesta programação. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
+                    <p class="signal-text">Comprar <b>{liters(row['Volume'])}</b> uma vez nesta programação. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
                 </div>
                 """.replace(",", "."),
                 unsafe_allow_html=True,
@@ -1172,7 +1213,7 @@ def render_main_panel(read_only=False):
             "Estoque Atual": st.column_config.NumberColumn(format="%.0f"),
             "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
             "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
-            "Volume Sugerido (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Volume": st.column_config.NumberColumn(format="%.0f"),
             "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
         },
     )
