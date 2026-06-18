@@ -53,19 +53,22 @@ USERS = {
         "name": "Sócio Administrador",
         "role": "Sócio",
         "password_hash": hashlib.sha256("suape2026".encode()).hexdigest(),
-        "station": None,
+        "stations": [],
+        "active": True,
     },
     "gerente_recife": {
         "name": "Gerente Casa Caiada",
         "role": "Gerente",
         "password_hash": hashlib.sha256("recife123".encode()).hexdigest(),
-        "station": "AP Casa Caiada",
+        "stations": ["AP Casa Caiada"],
+        "active": True,
     },
     "gerente_olinda": {
         "name": "Gerente VIP",
         "role": "Gerente",
         "password_hash": hashlib.sha256("olinda123".encode()).hexdigest(),
-        "station": "Posto VIP",
+        "stations": ["Posto VIP"],
+        "active": True,
     },
 }
 
@@ -205,6 +208,31 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def default_users():
+    return {username: payload.copy() for username, payload in USERS.items()}
+
+
+def migrate_users():
+    migrated = {}
+    for username, payload in st.session_state.users.items():
+        user = payload.copy()
+        if "stations" not in user:
+            station = user.pop("station", None)
+            user["stations"] = [station] if station else []
+        user.setdefault("active", True)
+        user.setdefault("role", "Gerente")
+        user.setdefault("name", username)
+        migrated[username] = user
+    st.session_state.users = migrated
+
+
+def current_user_payload(username):
+    user = st.session_state.users.get(username)
+    if not user:
+        return None
+    return {"username": username, **user}
+
+
 def money(value, decimals=2):
     if value is None:
         return "Indisponível"
@@ -314,12 +342,14 @@ def default_network():
 def init_state():
     st.session_state.setdefault("authenticated", False)
     st.session_state.setdefault("user", None)
+    st.session_state.setdefault("users", default_users())
     if st.session_state.get("data_version") != DATA_VERSION:
         st.session_state.network = default_network()
         st.session_state.data_version = DATA_VERSION
     st.session_state.setdefault("network", default_network())
     st.session_state.setdefault("market_cache", None)
     st.session_state.setdefault("last_market_update", None)
+    migrate_users()
 
 
 def login_screen():
@@ -338,11 +368,14 @@ def login_screen():
             submitted = st.form_submit_button("Entrar no painel", use_container_width=True)
 
         if submitted:
-            user = USERS.get(username.strip())
-            if user and user["password_hash"] == hash_password(password):
+            clean_username = username.strip()
+            user = st.session_state.users.get(clean_username)
+            if user and user.get("active", True) and user["password_hash"] == hash_password(password):
                 st.session_state.authenticated = True
-                st.session_state.user = {"username": username.strip(), **user}
+                st.session_state.user = current_user_payload(clean_username)
                 st.rerun()
+            elif user and not user.get("active", True):
+                st.error("Usuário inativo. Procure o administrador.")
             else:
                 st.error("Usuário ou senha inválidos.")
 
@@ -350,7 +383,7 @@ def login_screen():
 def network_records(station_filter=None):
     rows = []
     for station, payload in st.session_state.network.items():
-        if station_filter and station != station_filter:
+        if station_filter and station not in station_filter:
             continue
         for product, tank in payload["tanks"].items():
             capacity = max(float(tank.get("capacity", 0)), 0)
@@ -830,7 +863,7 @@ def header(title, subtitle):
 def allowed_station():
     user = st.session_state.user
     if user["role"] == "Gerente":
-        return user["station"]
+        return user.get("stations", [])
     return None
 
 
@@ -849,9 +882,6 @@ def render_sidebar():
         pages = ["Painel de Consulta"]
 
     page = st.sidebar.radio("Navegação", pages, label_visibility="collapsed")
-    st.sidebar.divider()
-    st.sidebar.caption("Usuários internos")
-    st.sidebar.code("socio / suape2026\n gerentes: recife123, olinda123", language="text")
 
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.authenticated = False
@@ -1212,6 +1242,137 @@ def apply_sales_upload(df, last_30_days=True):
     return updated, ignored, grouped
 
 
+def user_rows():
+    rows = []
+    for username, payload in st.session_state.users.items():
+        stations = payload.get("stations", [])
+        rows.append(
+            {
+                "Usuário": username,
+                "Nome": payload.get("name", ""),
+                "Perfil": payload.get("role", ""),
+                "Postos administrados": "Todos" if payload.get("role") == "Sócio" else ", ".join(stations),
+                "Status": "Ativo" if payload.get("active", True) else "Inativo",
+            }
+        )
+    return pd.DataFrame(rows).sort_values(["Perfil", "Usuário"])
+
+
+def render_user_crud():
+    st.dataframe(user_rows(), hide_index=True, use_container_width=True)
+
+    tabs = st.tabs(["Criar usuário", "Editar acessos", "Senha e exclusão"])
+    station_options = list(st.session_state.network.keys())
+
+    with tabs[0]:
+        with st.form("create_user_form"):
+            c1, c2 = st.columns(2)
+            username = c1.text_input("Usuário de login", placeholder="gerente_enseada")
+            name = c2.text_input("Nome completo", placeholder="Gerente Enseada")
+            role = c1.selectbox("Perfil", ["Gerente", "Sócio"], key="create_user_role")
+            password = c2.text_input("Senha inicial", type="password")
+            stations = st.multiselect(
+                "Postos que este usuário pode administrar",
+                station_options,
+                disabled=role == "Sócio",
+                help="Sócio tem acesso administrativo a todos os postos.",
+            )
+            active = st.checkbox("Usuário ativo", value=True)
+            submitted = st.form_submit_button("Criar usuário", type="primary")
+
+        if submitted:
+            clean_username = re.sub(r"\s+", "_", username.strip().lower())
+            if not clean_username or not name.strip() or not password:
+                st.error("Informe usuário, nome e senha inicial.")
+            elif clean_username in st.session_state.users:
+                st.error("Já existe um usuário com esse login.")
+            elif role == "Gerente" and not stations:
+                st.error("Gerente precisa administrar pelo menos um posto.")
+            else:
+                st.session_state.users[clean_username] = {
+                    "name": name.strip(),
+                    "role": role,
+                    "password_hash": hash_password(password),
+                    "stations": [] if role == "Sócio" else stations,
+                    "active": active,
+                }
+                st.success("Usuário criado.")
+                st.rerun()
+
+    with tabs[1]:
+        if not st.session_state.users:
+            st.info("Nenhum usuário cadastrado.")
+        else:
+            selected = st.selectbox("Usuário", sorted(st.session_state.users.keys()), key="edit_user_select")
+            payload = st.session_state.users[selected]
+            with st.form("edit_user_form"):
+                c1, c2 = st.columns(2)
+                name = c1.text_input("Nome", value=payload.get("name", ""))
+                role = c2.selectbox(
+                    "Perfil",
+                    ["Gerente", "Sócio"],
+                    index=0 if payload.get("role") == "Gerente" else 1,
+                    key="edit_role",
+                )
+                stations = st.multiselect(
+                    "Postos administrados",
+                    station_options,
+                    default=[station for station in payload.get("stations", []) if station in station_options],
+                    disabled=role == "Sócio",
+                )
+                can_disable = selected != st.session_state.user.get("username")
+                active = st.checkbox(
+                    "Usuário ativo",
+                    value=payload.get("active", True),
+                    disabled=not can_disable,
+                    help="Você não pode desativar o próprio usuário logado.",
+                )
+                submitted = st.form_submit_button("Salvar alterações", type="primary")
+
+            if submitted:
+                if role == "Gerente" and not stations:
+                    st.error("Gerente precisa administrar pelo menos um posto.")
+                else:
+                    st.session_state.users[selected].update(
+                        {
+                            "name": name.strip() or selected,
+                            "role": role,
+                            "stations": [] if role == "Sócio" else stations,
+                            "active": active,
+                        }
+                    )
+                    if selected == st.session_state.user.get("username"):
+                        st.session_state.user = current_user_payload(selected)
+                    st.success("Usuário atualizado.")
+                    st.rerun()
+
+    with tabs[2]:
+        selected = st.selectbox("Selecionar usuário", sorted(st.session_state.users.keys()), key="security_user_select")
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.form("reset_password_form"):
+                new_password = st.text_input("Nova senha", type="password")
+                confirm_password = st.text_input("Confirmar nova senha", type="password")
+                submitted = st.form_submit_button("Resetar senha", type="primary")
+            if submitted:
+                if not new_password or new_password != confirm_password:
+                    st.error("As senhas não conferem.")
+                else:
+                    st.session_state.users[selected]["password_hash"] = hash_password(new_password)
+                    st.success("Senha atualizada.")
+
+        with c2:
+            st.warning("Excluir usuário remove o acesso imediatamente nesta sessão.")
+            confirm_delete = st.text_input("Digite EXCLUIR para confirmar", key="delete_confirm")
+            if st.button("Excluir usuário", disabled=selected == st.session_state.user.get("username")):
+                if confirm_delete.strip().upper() != "EXCLUIR":
+                    st.error("Confirmação inválida.")
+                else:
+                    del st.session_state.users[selected]
+                    st.success("Usuário excluído.")
+                    st.rerun()
+
+
 def render_settings_sales():
     header(
         "⚙️ Configurações e Vendas",
@@ -1270,21 +1431,9 @@ def render_settings_sales():
 
     st.divider()
     st.subheader("Gestão de usuários")
-    users_df = pd.DataFrame(
-        [
-            {
-                "Usuário": username,
-                "Nome": payload["name"],
-                "Perfil": payload["role"],
-                "Posto vinculado": payload["station"] or "Todos",
-            }
-            for username, payload in USERS.items()
-        ]
-    )
-    st.dataframe(users_df, hide_index=True, use_container_width=True)
+    render_user_crud()
     st.info(
-        "Para produção, troque as senhas padrão e prefira Streamlit Secrets ou banco externo. "
-        "Neste protótipo, os hashes ficam em dicionário interno conforme solicitado.",
+        "Os usuários ficam em memória durante a sessão do Streamlit. Para ambiente definitivo, o próximo passo é persistir em banco ou Streamlit Secrets.",
         icon="🔐",
     )
 
