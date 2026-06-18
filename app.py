@@ -349,6 +349,7 @@ def init_state():
     st.session_state.setdefault("network", default_network())
     st.session_state.setdefault("market_cache", None)
     st.session_state.setdefault("last_market_update", None)
+    st.session_state.setdefault("sales_trends", {})
     migrate_users()
 
 
@@ -459,33 +460,88 @@ def get_market_data(force=False):
     return st.session_state.market_cache
 
 
-def purchase_recommendation(row, trend):
+def consumption_trend_for(row):
+    trends = st.session_state.get("sales_trends", {})
+    return trends.get((row["Posto"], row["Produto"]), "Estável")
+
+
+def trend_factor(consumption_trend):
+    if consumption_trend == "Alta":
+        return 1.15
+    if consumption_trend == "Queda":
+        return 0.90
+    return 1.00
+
+
+def stock_strategy(coverage, adjusted_vmd, capacity):
+    if adjusted_vmd <= 0:
+        return "🟡 Estoque normal"
+    giro = adjusted_vmd / capacity if capacity else 0
+    if coverage < 3 or giro >= 0.22:
+        return "🔴 Estoque alto"
+    if coverage > 7 and giro <= 0.10:
+        return "🟢 Estoque baixo"
+    return "🟡 Estoque normal"
+
+
+def strategy_target_days(strategy, consumption_trend):
+    if "alto" in strategy:
+        return 6 if consumption_trend == "Alta" else 5
+    if "baixo" in strategy:
+        return 3
+    return 4
+
+
+def purchase_recommendation(row, trend=None):
     capacity = float(row["Capacidade (L)"])
     stock = float(row["Estoque Atual (L)"])
     vmd = float(row["VMD (L/dia)"])
     headroom = max(capacity - stock, 0)
-    critical_volume = max((vmd * 3) - stock, 0)
+    consumption_trend = consumption_trend_for(row)
+    adjusted_vmd = max(vmd * trend_factor(consumption_trend), 0)
+    coverage = stock / adjusted_vmd if adjusted_vmd > 0 else 999
+    lead_time_days = 2
+    safety_days = 1.5 if consumption_trend == "Alta" else 1.0
+    reorder_point_days = lead_time_days + safety_days
+    strategy = stock_strategy(coverage, adjusted_vmd, capacity)
+    target_days = strategy_target_days(strategy, consumption_trend)
+    days_until_buy = max(math.floor(coverage - reorder_point_days), 0)
 
-    if trend == "ALTA":
-        volume = headroom
-        action = "Comprar imediato: completar tanque"
-    elif trend == "BAIXA":
-        volume = min(headroom, critical_volume)
-        action = "Adiar: comprar só segurança" if volume > 0 else "Adiar pedido"
-    else:
-        target_stock = min(capacity, vmd * 5)
-        volume = max(target_stock - stock, 0)
-        action = "Comprar moderado: manter 5 dias"
+    should_buy = coverage <= reorder_point_days
+    if not should_buy:
+        return {
+            "volume": 0,
+            "action": f"Não comprar agora; reavaliar em {days_until_buy} dia(s).",
+            "coverage": coverage,
+            "trend": consumption_trend,
+            "strategy": strategy,
+            "should_buy": "Não",
+            "when": f"Em {days_until_buy} dia(s)",
+        }
 
-    autonomy = float(row["Dias de Autonomia"])
-    if autonomy < 2:
-        action = "Crítico: comprar hoje"
-        volume = max(volume, min(headroom, (vmd * 3) - stock))
+    target_stock = min(capacity, adjusted_vmd * target_days)
+    raw_volume = max(target_stock - stock, 0)
+    rounded_volume = round_to_truck_compartment(raw_volume, headroom)
+    if rounded_volume == 0:
+        return {
+            "volume": 0,
+            "action": "Não comprar; volume necessário não fecha 5.000 L ou não há espaço.",
+            "coverage": coverage,
+            "trend": consumption_trend,
+            "strategy": strategy,
+            "should_buy": "Não",
+            "when": "Reavaliar",
+        }
 
-    rounded_volume = round_to_truck_compartment(max(volume, 0), headroom)
-    if rounded_volume == 0 and volume > 0:
-        action = "Aguardar: não fecha 5.000 L"
-    return rounded_volume, action
+    return {
+        "volume": rounded_volume,
+        "action": f"Comprar para repor até {target_days} dia(s) de cobertura ajustada.",
+        "coverage": coverage,
+        "trend": consumption_trend,
+        "strategy": strategy,
+        "should_buy": "Sim",
+        "when": "Hoje",
+    }
 
 
 def weekly_priority(autonomy, volume):
@@ -527,13 +583,11 @@ def build_weekly_receiving_schedule(exec_df):
     days = next_receiving_days()
     operational_days = [day for day in days if day["operates"]]
     candidates = exec_df[
-        (exec_df["Volume Recomendado para Compra (L)"] >= TRUCK_COMPARTMENT_LITERS)
-        & (exec_df["Prioridade da Semana"].isin(["Comprar hoje", "Comprar na semana", "Planejar compra"]))
+        (exec_df["Volume Sugerido (L)"] >= TRUCK_COMPARTMENT_LITERS)
+        & (exec_df["Comprar?"] == "Sim")
     ].copy()
 
-    priority_order = {"Comprar hoje": 0, "Comprar na semana": 1, "Planejar compra": 2}
-    candidates["Ordem"] = candidates["Prioridade da Semana"].map(priority_order).fillna(9)
-    candidates = candidates.sort_values(["Ordem", "Dias de Autonomia", "Posto", "Produto"])
+    candidates = candidates.sort_values(["Cobertura (dias)", "Posto", "Produto"])
 
     rows = []
     for i, (_, item) in enumerate(candidates.iterrows()):
@@ -544,11 +598,11 @@ def build_weekly_receiving_schedule(exec_df):
                 "Data": day["date"].strftime("%d/%m/%Y"),
                 "Posto": item["Posto"],
                 "Produto": item["Produto"],
-                "Comprar (L)": item["Volume Recomendado para Compra (L)"],
-                "Compartimentos": int(item["Volume Recomendado para Compra (L)"] / TRUCK_COMPARTMENT_LITERS),
-                "Autonomia Atual": item["Dias de Autonomia"],
-                "Prioridade": item["Prioridade da Semana"],
-                "Observação": item["Ação Requerida"],
+                "Comprar (L)": item["Volume Sugerido (L)"],
+                "Compartimentos": int(item["Volume Sugerido (L)"] / TRUCK_COMPARTMENT_LITERS),
+                "Autonomia Atual": item["Cobertura (dias)"],
+                "Prioridade": item["Estratégia de Estoque"],
+                "Observação": item["Recomendação"],
             }
         )
 
@@ -572,19 +626,23 @@ def build_executive_table(df, trend):
 
     rows = []
     for _, row in df.iterrows():
-        volume, action = purchase_recommendation(row, trend)
+        recommendation = purchase_recommendation(row, trend)
         rows.append(
             {
                 "Posto": row["Posto"],
                 "Produto": row["Produto"],
-                "Dias de Autonomia": round(float(row["Dias de Autonomia"]), 1),
-                "Volume Recomendado para Compra (L)": round(volume, 0),
-                "Múltiplo Caminhão": f"{TRUCK_COMPARTMENT_LITERS:,} L".replace(",", "."),
-                "Prioridade da Semana": weekly_priority(float(row["Dias de Autonomia"]), volume),
-                "Ação Requerida": action,
+                "Estoque Atual": round(float(row["Estoque Atual (L)"]), 0),
+                "Consumo Diário": round(float(row["VMD (L/dia)"]), 1),
+                "Cobertura (dias)": round(float(recommendation["coverage"]), 1),
+                "Tendência": recommendation["trend"],
+                "Estratégia de Estoque": recommendation["strategy"],
+                "Recomendação": recommendation["action"],
+                "Comprar?": recommendation["should_buy"],
+                "Quando Comprar": recommendation["when"],
+                "Volume Sugerido (L)": round(recommendation["volume"], 0),
             }
         )
-    return pd.DataFrame(rows).sort_values(["Dias de Autonomia", "Posto", "Produto"])
+    return pd.DataFrame(rows).sort_values(["Comprar?", "Cobertura (dias)", "Posto", "Produto"], ascending=[False, True, True, True])
 
 
 def donut_chart(station, station_df):
@@ -802,12 +860,13 @@ def apply_stock_import(stocks):
 
 
 def highlight_priority(row):
-    priority = row.get("Prioridade da Semana", "")
-    if priority == "Comprar hoje":
+    should_buy = row.get("Comprar?", "")
+    strategy = row.get("Estratégia de Estoque", "")
+    if should_buy == "Sim" and "alto" in strategy:
         return ["background-color: rgba(239, 68, 68, .28); color: #fee2e2; font-weight: 700"] * len(row)
-    if priority == "Comprar na semana":
+    if should_buy == "Sim":
         return ["background-color: rgba(245, 158, 11, .24); color: #fef3c7; font-weight: 700"] * len(row)
-    if priority == "Planejar compra":
+    if "baixo" in strategy:
         return ["background-color: rgba(56, 189, 248, .18); color: #dbeafe"] * len(row)
     return [""] * len(row)
 
@@ -1009,8 +1068,8 @@ def render_main_panel(read_only=False):
         )
 
     week_df = exec_df[
-        exec_df["Prioridade da Semana"].isin(["Comprar hoje", "Comprar na semana"])
-        & (exec_df["Volume Recomendado para Compra (L)"] >= TRUCK_COMPARTMENT_LITERS)
+        (exec_df["Comprar?"] == "Sim")
+        & (exec_df["Volume Sugerido (L)"] >= TRUCK_COMPARTMENT_LITERS)
     ].copy()
     if not week_df.empty:
         st.markdown("#### Ênfase da semana")
@@ -1018,8 +1077,8 @@ def render_main_panel(read_only=False):
             st.markdown(
                 f"""
                 <div class="signal-card signal-up">
-                    <div class="signal-title">{row['Prioridade da Semana']} · {row['Posto']} · {row['Produto']}</div>
-                    <p class="signal-text">Comprar <b>{liters(row['Volume Recomendado para Compra (L)'])}</b> em múltiplos de {TRUCK_COMPARTMENT_LITERS:,} L. Autonomia atual: {row['Dias de Autonomia']:.1f} dias.</p>
+                    <div class="signal-title">{row['Posto']} · {row['Produto']}</div>
+                    <p class="signal-text">Comprar <b>{liters(row['Volume Sugerido (L)'])}</b> uma vez nesta programação. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
                 </div>
                 """.replace(",", "."),
                 unsafe_allow_html=True,
@@ -1033,8 +1092,10 @@ def render_main_panel(read_only=False):
         hide_index=True,
         use_container_width=True,
         column_config={
-            "Dias de Autonomia": st.column_config.NumberColumn(format="%.1f"),
-            "Volume Recomendado para Compra (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Estoque Atual": st.column_config.NumberColumn(format="%.0f"),
+            "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
+            "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
+            "Volume Sugerido (L)": st.column_config.NumberColumn(format="%.0f"),
         },
     )
 
@@ -1222,6 +1283,28 @@ def apply_sales_upload(df, last_30_days=True):
         df = df[df["Data"].between(cutoff, latest)].copy()
 
     if "Data" in df.columns and df["Data"].notna().any():
+        latest = df["Data"].max()
+        last_7_start = latest - pd.Timedelta(days=6)
+        prev_7_start = latest - pd.Timedelta(days=13)
+        recent = df[df["Data"].between(last_7_start, latest)].groupby(["Posto", "Produto"])["Litros"].sum()
+        previous = df[df["Data"].between(prev_7_start, last_7_start - pd.Timedelta(days=1))].groupby(["Posto", "Produto"])["Litros"].sum()
+        trends = {}
+        for key in set(recent.index).union(set(previous.index)):
+            recent_avg = float(recent.get(key, 0)) / 7
+            previous_avg = float(previous.get(key, 0)) / 7
+            if previous_avg <= 0:
+                trend = "Estável"
+            else:
+                change = (recent_avg - previous_avg) / previous_avg
+                if change >= 0.12:
+                    trend = "Alta"
+                elif change <= -0.12:
+                    trend = "Queda"
+                else:
+                    trend = "Estável"
+            trends[key] = trend
+        st.session_state.sales_trends.update(trends)
+
         days = df.groupby(["Posto", "Produto"])["Data"].nunique().reset_index(name="dias")
         volume = df.groupby(["Posto", "Produto"])["Litros"].sum().reset_index(name="litros")
         grouped = volume.merge(days, on=["Posto", "Produto"], how="left")
