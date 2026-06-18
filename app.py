@@ -28,7 +28,10 @@ st.set_page_config(
 
 
 TRUCK_COMPARTMENT_LITERS = 5000
-DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias"
+TRUCK_CAPACITY_LITERS = 25000
+AVAILABLE_TRUCKS_PER_DAY = 2
+DAILY_DELIVERY_CAPACITY_LITERS = TRUCK_CAPACITY_LITERS * AVAILABLE_TRUCKS_PER_DAY
+DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias-prazo-logistica"
 PRODUCTS = [
     "Gasolina Comum",
     "Etanol Comum",
@@ -303,6 +306,7 @@ def default_network():
     return {
         "AP Casa Caiada": {
             "city": "Olinda",
+            "payment_term_days": 7,
             "tanks": {
                 "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 974.97},
                 "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 1980.89},
@@ -310,6 +314,7 @@ def default_network():
         },
         "Posto Doze Filial II": {
             "city": "Pernambuco",
+            "payment_term_days": 7,
             "tanks": {
                 "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 273.69},
                 "Diesel Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 810.59},
@@ -319,6 +324,7 @@ def default_network():
         },
         "Posto Enseada do Norte": {
             "city": "Pernambuco",
+            "payment_term_days": 14,
             "tanks": {
                 "Gasolina Podium": {"capacity": 15000.0, "stock": 0.0, "vmd": 214.11},
                 "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 374.59},
@@ -329,6 +335,7 @@ def default_network():
         },
         "Posto VIP": {
             "city": "Pernambuco",
+            "payment_term_days": 7,
             "tanks": {
                 "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 141.79},
                 "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 212.77},
@@ -396,6 +403,7 @@ def network_records(station_filter=None):
                 {
                     "Posto": station,
                     "Cidade": payload.get("city", ""),
+                    "Prazo Financeiro (dias)": int(payload.get("payment_term_days", 0)),
                     "Produto": product,
                     "Capacidade (L)": capacity,
                     "Estoque Atual (L)": stock,
@@ -497,6 +505,7 @@ def purchase_recommendation(row, trend=None):
     stock = float(row["Estoque Atual (L)"])
     vmd = float(row["VMD (L/dia)"])
     headroom = max(capacity - stock, 0)
+    payment_term_days = int(row.get("Prazo Financeiro (dias)", 0))
     consumption_trend = consumption_trend_for(row)
     adjusted_vmd = max(vmd * trend_factor(consumption_trend), 0)
     coverage = stock / adjusted_vmd if adjusted_vmd > 0 else 999
@@ -505,18 +514,26 @@ def purchase_recommendation(row, trend=None):
     reorder_point_days = lead_time_days + safety_days
     strategy = stock_strategy(coverage, adjusted_vmd, capacity)
     target_days = strategy_target_days(strategy, consumption_trend)
+    if trend == "ALTA":
+        target_days = min(max(target_days + 2, 5), 7)
+    elif trend == "BAIXA":
+        target_days = max(target_days - 1, 3)
     days_until_buy = max(math.floor(coverage - reorder_point_days), 0)
 
-    should_buy = coverage <= reorder_point_days
+    shortage_risk = coverage <= reorder_point_days
+    price_opportunity = trend == "ALTA" and coverage <= target_days + 1 and headroom >= TRUCK_COMPARTMENT_LITERS
+    should_buy = shortage_risk or price_opportunity
     if not should_buy:
+        finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
         return {
             "volume": 0,
-            "action": f"Não comprar agora; reavaliar em {days_until_buy} dia(s).",
+            "action": f"Não comprar agora; cobertura suficiente. Reavaliar em {days_until_buy} dia(s).{finance_note}",
             "coverage": coverage,
             "trend": consumption_trend,
             "strategy": strategy,
             "should_buy": "Não",
             "when": f"Em {days_until_buy} dia(s)",
+            "reason": "Cobertura suficiente",
         }
 
     target_stock = min(capacity, adjusted_vmd * target_days)
@@ -531,16 +548,20 @@ def purchase_recommendation(row, trend=None):
             "strategy": strategy,
             "should_buy": "Não",
             "when": "Reavaliar",
+            "reason": "Sem lote logístico",
         }
 
+    reason = "Risco de falta" if shortage_risk else "Alta prevista: comprar antes do aumento"
+    finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
     return {
         "volume": rounded_volume,
-        "action": f"Comprar para repor até {target_days} dia(s) de cobertura ajustada.",
+        "action": f"{reason}. Comprar para repor até {target_days} dia(s) de cobertura ajustada.{finance_note}",
         "coverage": coverage,
         "trend": consumption_trend,
         "strategy": strategy,
         "should_buy": "Sim",
         "when": "Hoje",
+        "reason": reason,
     }
 
 
@@ -582,26 +603,42 @@ def next_receiving_days(days=7):
 def build_weekly_receiving_schedule(exec_df):
     days = next_receiving_days()
     operational_days = [day for day in days if day["operates"]]
+    remaining_capacity = {day["date"]: DAILY_DELIVERY_CAPACITY_LITERS for day in operational_days}
     candidates = exec_df[
         (exec_df["Volume Sugerido (L)"] >= TRUCK_COMPARTMENT_LITERS)
         & (exec_df["Comprar?"] == "Sim")
     ].copy()
 
-    candidates = candidates.sort_values(["Cobertura (dias)", "Posto", "Produto"])
+    reason_order = {"Risco de falta": 0, "Alta prevista: comprar antes do aumento": 1}
+    candidates["Ordem Motivo"] = candidates["Motivo"].map(reason_order).fillna(5)
+    candidates = candidates.sort_values(
+        ["Ordem Motivo", "Cobertura (dias)", "Prazo Financeiro (dias)", "Posto", "Produto"],
+        ascending=[True, True, False, True, True],
+    )
 
     rows = []
-    for i, (_, item) in enumerate(candidates.iterrows()):
-        day = operational_days[i % len(operational_days)] if operational_days else days[0]
+    for _, item in candidates.iterrows():
+        volume = float(item["Volume Sugerido (L)"])
+        day = None
+        for candidate_day in operational_days:
+            if remaining_capacity[candidate_day["date"]] >= volume:
+                day = candidate_day
+                remaining_capacity[candidate_day["date"]] -= volume
+                break
+        if day is None:
+            day = operational_days[-1] if operational_days else days[0]
         rows.append(
             {
                 "Chegada Prevista": day["label"],
                 "Data": day["date"].strftime("%d/%m/%Y"),
                 "Posto": item["Posto"],
                 "Produto": item["Produto"],
-                "Comprar (L)": item["Volume Sugerido (L)"],
-                "Compartimentos": int(item["Volume Sugerido (L)"] / TRUCK_COMPARTMENT_LITERS),
+                "Comprar (L)": volume,
+                "Compartimentos": int(volume / TRUCK_COMPARTMENT_LITERS),
                 "Autonomia Atual": item["Cobertura (dias)"],
+                "Prazo Financeiro (dias)": item["Prazo Financeiro (dias)"],
                 "Prioridade": item["Estratégia de Estoque"],
+                "Motivo": item["Motivo"],
                 "Observação": item["Recomendação"],
             }
         )
@@ -613,6 +650,8 @@ def build_weekly_receiving_schedule(exec_df):
                 "Dia": day["label"],
                 "Data": day["date"].strftime("%d/%m/%Y"),
                 "Status Base": "Sem operação" if not day["operates"] else "Operando",
+                "Capacidade Logística": "0 L" if not day["operates"] else liters(DAILY_DELIVERY_CAPACITY_LITERS),
+                "Caminhões": 0 if not day["operates"] else AVAILABLE_TRUCKS_PER_DAY,
             }
             for day in days
         ]
@@ -636,6 +675,8 @@ def build_executive_table(df, trend):
                 "Cobertura (dias)": round(float(recommendation["coverage"]), 1),
                 "Tendência": recommendation["trend"],
                 "Estratégia de Estoque": recommendation["strategy"],
+                "Prazo Financeiro (dias)": int(row.get("Prazo Financeiro (dias)", 0)),
+                "Motivo": recommendation["reason"],
                 "Recomendação": recommendation["action"],
                 "Comprar?": recommendation["should_buy"],
                 "Quando Comprar": recommendation["when"],
@@ -725,7 +766,7 @@ def parse_station_import_text(text):
         if station_match:
             current_station = station_match.group(2).strip().title()
             current_city = "Pernambuco"
-            stations.setdefault(current_station, {"city": current_city, "tanks": {}})
+            stations.setdefault(current_station, {"city": current_city, "payment_term_days": 7, "tanks": {}})
             continue
         if city_match and current_station:
             current_city = city_match.group(2).strip().title()
@@ -752,8 +793,15 @@ def parse_station_import_text(text):
 
 def merge_imported_stations(imported):
     for station, payload in imported.items():
-        st.session_state.network.setdefault(station, {"city": payload["city"], "tanks": {}})
+        st.session_state.network.setdefault(
+            station,
+            {"city": payload["city"], "payment_term_days": payload.get("payment_term_days", 7), "tanks": {}},
+        )
         st.session_state.network[station]["city"] = payload["city"]
+        st.session_state.network[station]["payment_term_days"] = payload.get(
+            "payment_term_days",
+            st.session_state.network[station].get("payment_term_days", 7),
+        )
         for product, tank in payload["tanks"].items():
             existing = st.session_state.network[station]["tanks"].get(product, {})
             st.session_state.network[station]["tanks"][product] = {
@@ -1047,7 +1095,10 @@ def render_main_panel(read_only=False):
     weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
 
     st.markdown("#### Programação semanal de recebimento")
-    st.caption("Janela móvel de 7 dias a partir de amanhã. Domingo aparece como sem operação da base.")
+    st.caption(
+        f"Janela móvel de 7 dias a partir de amanhã. Domingo não opera. "
+        f"Capacidade planejada: {AVAILABLE_TRUCKS_PER_DAY} caminhões de {liters(TRUCK_CAPACITY_LITERS)} por dia."
+    )
     st.dataframe(
         base_calendar,
         hide_index=True,
@@ -1064,6 +1115,7 @@ def render_main_panel(read_only=False):
             column_config={
                 "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
                 "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
+                "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
             },
         )
 
@@ -1096,6 +1148,7 @@ def render_main_panel(read_only=False):
             "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
             "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
             "Volume Sugerido (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
         },
     )
 
@@ -1110,6 +1163,13 @@ def render_network_admin():
         with st.form("new_station_form"):
             name = st.text_input("Nome do posto", placeholder="Posto Pina")
             city = st.text_input("Cidade", placeholder="Recife")
+            payment_term_days = st.number_input(
+                "Prazo financeiro padrão do posto (dias)",
+                min_value=0,
+                max_value=90,
+                value=7,
+                step=1,
+            )
             selected_products = st.multiselect(
                 "Produtos vendidos neste posto",
                 PRODUCTS,
@@ -1139,13 +1199,14 @@ def render_network_admin():
             else:
                 st.session_state.network[clean_name] = {
                     "city": city.strip() or "Pernambuco",
+                    "payment_term_days": int(payment_term_days),
                     "tanks": {
                         product: {
                             "capacity": float(capacities[product]),
                             "stock": 0.0,
                             "vmd": float(vmds[product]),
                         }
-                        for product in PRODUCTS
+                        for product in selected_products
                     },
                 }
                 st.success("Posto cadastrado.")
@@ -1198,10 +1259,11 @@ def render_network_admin():
     st.subheader("Editar capacidades, estoque e VMD")
     df = network_records()
     edited = st.data_editor(
-        df[["Posto", "Cidade", "Produto", "Capacidade (L)", "Estoque Atual (L)", "VMD (L/dia)"]],
+        df[["Posto", "Cidade", "Prazo Financeiro (dias)", "Produto", "Capacidade (L)", "Estoque Atual (L)", "VMD (L/dia)"]],
         hide_index=True,
         use_container_width=True,
         column_config={
+            "Prazo Financeiro (dias)": st.column_config.NumberColumn(min_value=0, max_value=90, step=1, format="%d"),
             "Capacidade (L)": st.column_config.NumberColumn(min_value=0, step=1000, format="%.0f"),
             "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
             "VMD (L/dia)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
@@ -1215,7 +1277,15 @@ def render_network_admin():
             product = str(row["Produto"]).strip()
             if product not in PRODUCTS or not station:
                 continue
-            new_network.setdefault(station, {"city": str(row["Cidade"]).strip(), "tanks": {}})
+            new_network.setdefault(
+                station,
+                {
+                    "city": str(row["Cidade"]).strip(),
+                    "payment_term_days": int(row.get("Prazo Financeiro (dias)", 0)),
+                    "tanks": {},
+                },
+            )
+            new_network[station]["payment_term_days"] = int(row.get("Prazo Financeiro (dias)", 0))
             capacity = max(float(row["Capacidade (L)"]), 0)
             stock = min(max(float(row["Estoque Atual (L)"]), 0), capacity)
             vmd = max(float(row["VMD (L/dia)"]), 0)
