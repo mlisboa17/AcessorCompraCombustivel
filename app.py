@@ -779,6 +779,48 @@ def highlight_priority(row):
     return [""] * len(row)
 
 
+def filter_table(df, key, label="Filtros da planilha"):
+    if df.empty:
+        return df
+
+    filtered = df.copy()
+    with st.expander(label, expanded=False):
+        selected_columns = st.multiselect(
+            "Colunas para filtrar",
+            list(filtered.columns),
+            default=[],
+            key=f"{key}_columns",
+        )
+
+        for column in selected_columns:
+            series = filtered[column]
+            if pd.api.types.is_numeric_dtype(series):
+                min_value = float(series.min())
+                max_value = float(series.max())
+                if min_value == max_value:
+                    st.caption(f"{column}: todos os registros têm valor {min_value:g}.")
+                    continue
+                selected_range = st.slider(
+                    column,
+                    min_value=min_value,
+                    max_value=max_value,
+                    value=(min_value, max_value),
+                    key=f"{key}_{column}_range",
+                )
+                filtered = filtered[filtered[column].between(selected_range[0], selected_range[1])]
+            else:
+                values = sorted([str(value) for value in series.dropna().unique()])
+                selected_values = st.multiselect(
+                    column,
+                    values,
+                    default=values,
+                    key=f"{key}_{column}_values",
+                )
+                filtered = filtered[filtered[column].astype(str).isin(selected_values)]
+
+    return filtered
+
+
 def header(title, subtitle):
     st.markdown('<div class="top-title">', unsafe_allow_html=True)
     st.title(title)
@@ -925,8 +967,9 @@ def render_main_panel(read_only=False):
     if weekly_schedule.empty:
         st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
     else:
+        weekly_schedule_view = filter_table(weekly_schedule, "weekly_schedule", "Filtros da programação semanal")
         st.dataframe(
-            weekly_schedule,
+            weekly_schedule_view,
             hide_index=True,
             use_container_width=True,
             column_config={
@@ -954,8 +997,9 @@ def render_main_panel(read_only=False):
     else:
         st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
 
+    exec_df_view = filter_table(exec_df, "executive_table", "Filtros da saída executiva")
     st.dataframe(
-        exec_df.style.apply(highlight_priority, axis=1),
+        exec_df_view.style.apply(highlight_priority, axis=1),
         hide_index=True,
         use_container_width=True,
         column_config={
