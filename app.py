@@ -219,8 +219,10 @@ def normalize_product(value):
     raw = str(value or "").strip().upper()
     raw = re.sub(r"\s+", " ", raw)
     raw = raw.replace(".", "")
+    raw = raw.replace(" A PRAZO", "")
     raw = raw.replace(" GRID", "")
     raw = raw.replace(" PETROBRAS PO", "")
+    raw = raw.replace(" PETROBRAS PODIUM", "")
     raw = raw.replace(" C ADIT", "")
     aliases = {
         "GASOLINA": "Gasolina Comum",
@@ -244,6 +246,7 @@ def normalize_product(value):
         "DIESEL B S10 ADITIVADO": "Diesel Aditivado",
         "DIESEL ADITIVADO": "Diesel Aditivado",
         "GASOLINA PREMIUM": "Gasolina Podium",
+        "GASOLINA PREMIUM PODIUM": "Gasolina Podium",
     }
     return aliases.get(raw, str(value or "").strip().title())
 
@@ -254,6 +257,18 @@ def round_to_truck_compartment(volume, headroom):
     rounded = math.ceil(volume / TRUCK_COMPARTMENT_LITERS) * TRUCK_COMPARTMENT_LITERS
     max_load = math.floor(headroom / TRUCK_COMPARTMENT_LITERS) * TRUCK_COMPARTMENT_LITERS
     return max(0, min(rounded, max_load))
+
+
+def normalize_station_name(value):
+    name = re.sub(r"\s+", " ", str(value or "").strip())
+    upper = name.upper()
+    aliases = {
+        "AP CASA CAIADA": "AP Casa Caiada",
+        "POSTO DOZE FILIAL II": "Posto Doze Filial II",
+        "POSTO ENSEADA DO NORTE": "Posto Enseada do Norte",
+        "POSTO VIP": "Posto VIP",
+    }
+    return aliases.get(upper, name.title())
 
 
 def default_network():
@@ -655,6 +670,102 @@ def merge_imported_stations(imported):
                 "stock": float(existing.get("stock", 0)),
                 "vmd": float(tank["vmd"]),
             }
+
+
+def parse_brazilian_number(value):
+    return float(str(value).replace(".", "").replace(",", "."))
+
+
+def parse_stock_line(line):
+    refs = "000004|004118|000003|000002|000222|000257|000106|000129|000132|000131|000130"
+    ref_match = re.search(rf"({refs})\s+[\d,]+", line)
+    if not ref_match:
+        return None
+
+    before_ref = line[: ref_match.start()].strip()
+    quantity_match = re.search(r"(\d{1,3}(?:\.\d{3})+,\d{2}|\d{1,2},\d{2})$", before_ref)
+    if not quantity_match:
+        return None
+
+    quantity_text = quantity_match.group(1)
+    integer_part = quantity_text.split(",", 1)[0]
+    if "." in integer_part and len(integer_part.split(".", 1)[0]) == 3:
+        quantity_text = quantity_text[1:]
+    elif "." not in integer_part and len(integer_part) == 2 and quantity_match.start() > 0:
+        quantity_text = quantity_text[1:]
+
+    before_quantity = before_ref[: quantity_match.start()].strip()
+    product_part = re.split(r"\s+\d[\d\.]*,\d{2,4}\s+", before_quantity, maxsplit=1)[0].strip()
+    if not product_part:
+        return None
+
+    product = normalize_product(product_part)
+    if product not in PRODUCTS:
+        return None
+
+    return product, parse_brazilian_number(quantity_text)
+
+
+def parse_stock_import_text(text):
+    stocks = {}
+    current_station = None
+    pending_line = ""
+
+    for raw_line in text.splitlines():
+        line = re.sub(r"\s+", " ", raw_line.strip())
+        if not line:
+            continue
+
+        station_match = re.match(r"^(.+?)Filial:$", line)
+        if station_match:
+            current_station = normalize_station_name(station_match.group(1))
+            stocks.setdefault(current_station, {})
+            pending_line = ""
+            continue
+
+        if not current_station:
+            continue
+
+        upper = line.upper()
+        if (
+            "PRODUTO CUSTO" in upper
+            or "TOTAL" in upper
+            or "USUÁRIO" in upper
+            or "RELATÓRIO" in upper
+            or "GRUPO DE PRODUTO" in upper
+        ):
+            pending_line = ""
+            continue
+
+        candidate = f"{pending_line} {line}".strip() if pending_line else line
+        parsed = parse_stock_line(candidate)
+        if parsed:
+            product, quantity = parsed
+            stocks[current_station][product] = stocks[current_station].get(product, 0.0) + quantity
+            pending_line = ""
+        elif re.match(r"^[A-ZÁÉÍÓÚÂÊÔÃÕÇ0-9\s\.]+$", upper):
+            pending_line = candidate
+        else:
+            pending_line = ""
+
+    return {station: payload for station, payload in stocks.items() if payload}
+
+
+def apply_stock_import(stocks):
+    updated = 0
+    ignored = []
+    for station, products in stocks.items():
+        if station not in st.session_state.network:
+            ignored.append(f"{station} / posto não cadastrado")
+            continue
+        for product, stock in products.items():
+            if product not in st.session_state.network[station]["tanks"]:
+                ignored.append(f"{station} / {product}")
+                continue
+            capacity = st.session_state.network[station]["tanks"][product]["capacity"]
+            st.session_state.network[station]["tanks"][product]["stock"] = min(max(float(stock), 0), capacity)
+            updated += 1
+    return updated, ignored
 
 
 def highlight_priority(row):
@@ -1078,6 +1189,40 @@ def render_settings_sales():
             st.dataframe(grouped, hide_index=True, use_container_width=True)
         except Exception as exc:
             st.error(f"Não foi possível processar o arquivo: {exc}")
+
+    st.divider()
+    st.subheader("Importar estoque atual")
+    st.caption(
+        "Envie a Relação de Estoque em PDF ou TXT. O app atualiza somente os produtos já cadastrados em cada posto "
+        "e limita o estoque à capacidade do tanque."
+    )
+    stock_upload = st.file_uploader("Arquivo de estoque atual", type=["pdf", "txt"], key="stock_import")
+    if stock_upload is not None:
+        try:
+            stock_text = extract_text_from_upload(stock_upload)
+            stocks = parse_stock_import_text(stock_text)
+            if not stocks:
+                st.warning("Não encontrei estoques válidos no arquivo.")
+            else:
+                stock_rows = []
+                for station, products in stocks.items():
+                    for product, quantity in products.items():
+                        stock_rows.append(
+                            {
+                                "Posto": station,
+                                "Produto": product,
+                                "Estoque Atual do Arquivo (L)": quantity,
+                            }
+                        )
+                st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
+                if st.button("Atualizar estoque atual", type="primary"):
+                    updated, ignored = apply_stock_import(stocks)
+                    st.success(f"Estoque atualizado para {updated} produto(s).")
+                    if ignored:
+                        st.warning("Itens ignorados: " + "; ".join(ignored[:12]))
+                    st.rerun()
+        except Exception as exc:
+            st.error(f"Não foi possível importar o estoque: {exc}")
 
     st.divider()
     st.subheader("Gestão de usuários")
