@@ -1,4 +1,5 @@
 import hashlib
+import html as html_lib
 import io
 import math
 import re
@@ -1397,23 +1398,25 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
                 "date": item.get("Data", "-"),
             }
 
-    html = ['<div class="mobile-card-grid">']
+    html_parts = ['<div class="mobile-card-grid">']
     for _, row in source.iterrows():
         arrival = schedule_lookup.get((row["Posto"], row["Produto"]), {"label": row.get("Quando", "-"), "date": "-"})
         volume = liters(row["Volume"]) if float(row["Volume"]) > 0 else "0 L"
-        html.append(
-            f"""
-            <div class="mobile-summary-card">
-                <h4>{row['Posto']} · {row['Produto']}</h4>
-                <p><b>Comprar?</b> {row['Comprar?']} · <b>Volume:</b> {volume}</p>
-                <p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>
-                <p><b>Chegada:</b> {arrival['date']} · {arrival['label']}</p>
-                <p><b>Motivo:</b> {row['Motivo']}</p>
-            </div>
-            """
+        title = html_lib.escape(f"{row['Posto']} · {row['Produto']}")
+        buy = html_lib.escape(str(row["Comprar?"]))
+        arrival_text = html_lib.escape(f"{arrival['date']} · {arrival['label']}")
+        reason = html_lib.escape(str(row["Motivo"]))
+        html_parts.append(
+            '<div class="mobile-summary-card">'
+            f"<h4>{title}</h4>"
+            f"<p><b>Comprar?</b> {buy} · <b>Volume:</b> {volume}</p>"
+            f"<p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>"
+            f"<p><b>Chegada:</b> {arrival_text}</p>"
+            f"<p><b>Motivo:</b> {reason}</p>"
+            "</div>"
         )
-    html.append("</div>")
-    st.markdown("".join(html), unsafe_allow_html=True)
+    html_parts.append("</div>")
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
 
 
 def header(title, subtitle):
