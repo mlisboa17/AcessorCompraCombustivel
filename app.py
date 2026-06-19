@@ -103,8 +103,11 @@ PURCHASE_COLUMN_HELP = {
     "Prazo Vibra": "Prazo máximo recomendado para inserir o pedido no site da Vibra.",
     "Prazo Alterar/Cancelar": "Prazo limite para tentar alterar ou cancelar o pedido.",
     "Prazo Transporte": "Prazo para comunicar o transportador com garantia operacional.",
+    "Aprovado": "Marque quando a sugestão foi aceita internamente. O volume passa a contar como carga futura e evita recomendação repetida.",
     "Inserido na Vibra": "Marque quando o pedido já foi lançado no sistema da Vibra.",
     "Enviado ao Transportador": "Marque quando a programação já foi enviada ao transportador.",
+    "Entregue": "Marque quando a carga chegou ao posto. O pedido deixa de bloquear nova recomendação futura.",
+    "Cancelado": "Marque se o pedido foi cancelado. O volume deixa de entrar como estoque futuro.",
     "Status": "Situação operacional do pedido considerando prazos e confirmações.",
     "Observacao Operacional": "Resumo automático do risco ou pendência operacional.",
 }
@@ -1104,6 +1107,7 @@ def init_state():
     st.session_state.setdefault("sales_trends", {})
     st.session_state.setdefault("decision_history", [])
     st.session_state.setdefault("manual_schedule_items", [])
+    st.session_state.setdefault("loading_order_statuses", {})
     migrate_users()
 
 
@@ -2164,12 +2168,83 @@ def order_tracking_key(row):
     )
 
 
+def parse_order_tracking_key(key):
+    parts = str(key).split("|")
+    if len(parts) != 4:
+        return None
+    try:
+        order_date = datetime.strptime(parts[0], "%d/%m/%Y").date()
+        volume = float(parts[3])
+    except Exception:
+        return None
+    return {
+        "date": order_date,
+        "date_text": parts[0],
+        "station": parts[1],
+        "product": parts[2],
+        "volume": volume,
+    }
+
+
+def is_active_future_order(status):
+    if bool(status.get("delivered", False)) or bool(status.get("cancelled", False)):
+        return False
+    return any(
+        bool(status.get(flag, False))
+        for flag in ["approved", "inserted_vibra", "sent_transport"]
+    )
+
+
+def active_future_orders_lookup(start=None, end=None):
+    tracking = st.session_state.setdefault("loading_order_statuses", {})
+    start = start or now_local().date()
+    rows = []
+    for key, status in tracking.items():
+        parsed = parse_order_tracking_key(key)
+        if not parsed or not is_active_future_order(status):
+            continue
+        if parsed["date"] < start:
+            continue
+        if end and parsed["date"] > end:
+            continue
+        rows.append(
+            {
+                "Data": parsed["date_text"],
+                "_Data": parsed["date"],
+                "Posto": parsed["station"],
+                "Produto": parsed["product"],
+                "Volume (L)": parsed["volume"],
+                "Aprovado": bool(status.get("approved", False)),
+                "Inserido na Vibra": bool(status.get("inserted_vibra", False)),
+                "Enviado ao Transportador": bool(status.get("sent_transport", False)),
+            }
+        )
+    if not rows:
+        return {}, pd.DataFrame(columns=["Data", "Posto", "Produto", "Volume (L)", "Aprovado", "Inserido na Vibra", "Enviado ao Transportador"])
+
+    future_df = pd.DataFrame(rows).sort_values(["_Data", "Posto", "Produto"])
+    lookup = {}
+    for _, row in future_df.iterrows():
+        key = (row["_Data"], row["Posto"], row["Produto"])
+        lookup[key] = lookup.get(key, 0.0) + float(row["Volume (L)"])
+    return lookup, future_df.drop(columns=["_Data"])
+
+
 def loading_order_status(row, now=None):
     now = now or now_local()
+    cancelled = bool(row.get("Cancelado", False))
+    delivered = bool(row.get("Entregue", False))
+    approved = bool(row.get("Aprovado", False))
     inserted = bool(row.get("Inserido na Vibra", False))
     sent = bool(row.get("Enviado ao Transportador", False))
+    if cancelled:
+        return "Cancelado"
+    if delivered:
+        return "Entregue"
     if inserted and sent:
         return "Pronto"
+    if approved and not inserted and not sent:
+        return "Aprovado"
     if now > row["Prazo Vibra"]:
         return "Urgente"
     if now > row["Prazo Transporte"]:
@@ -2183,8 +2258,14 @@ def loading_order_status(row, now=None):
 
 def loading_status_note(row, now=None):
     now = now or now_local()
+    if row["Status"] == "Cancelado":
+        return "Pedido cancelado; nao entra no estoque futuro."
+    if row["Status"] == "Entregue":
+        return "Carga entregue; estoque futuro ja nao deve bloquear nova compra."
     if row["Status"] == "Pronto":
         return "Pedido inserido e transportador informado."
+    if row["Status"] == "Aprovado":
+        return "Aprovado internamente; sera considerado como carga futura."
     if now > row["Prazo Vibra"]:
         return "Fora do prazo padrao da Vibra; tratar como urgencia."
     if now > row["Prazo Transporte"]:
@@ -2204,8 +2285,11 @@ def build_loading_orders(schedule):
         "Prazo Vibra",
         "Prazo Alterar/Cancelar",
         "Prazo Transporte",
+        "Aprovado",
         "Inserido na Vibra",
         "Enviado ao Transportador",
+        "Entregue",
+        "Cancelado",
         "Status",
         "Observacao Operacional",
     ]
@@ -2230,8 +2314,11 @@ def build_loading_orders(schedule):
             "Prazo Vibra": vibra_order_deadline(load_date),
             "Prazo Alterar/Cancelar": vibra_change_deadline(load_date),
             "Prazo Transporte": batch_transport_deadline(load_date),
+            "Aprovado": bool(stored.get("approved", False)),
             "Inserido na Vibra": bool(stored.get("inserted_vibra", False)),
             "Enviado ao Transportador": bool(stored.get("sent_transport", False)),
+            "Entregue": bool(stored.get("delivered", False)),
+            "Cancelado": bool(stored.get("cancelled", False)),
         }
         row["Status"] = loading_order_status(row)
         row["Observacao Operacional"] = loading_status_note(row)
@@ -2265,9 +2352,36 @@ def save_loading_tracking(orders_df):
         if not key:
             continue
         tracking[key] = {
+            "approved": bool(row.get("Aprovado", False)),
             "inserted_vibra": bool(row.get("Inserido na Vibra", False)),
             "sent_transport": bool(row.get("Enviado ao Transportador", False)),
+            "delivered": bool(row.get("Entregue", False)),
+            "cancelled": bool(row.get("Cancelado", False)),
         }
+
+
+def approve_schedule_orders(schedule, days_ahead):
+    if schedule.empty:
+        return 0
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=max(min(int(days_ahead), 7), 1) - 1)
+    source = schedule.copy()
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    source = source[source["_DataFiltro"].dt.date.between(start, end)].copy()
+    tracking = st.session_state.setdefault("loading_order_statuses", {})
+    approved_count = 0
+    for _, row in source.iterrows():
+        key = order_tracking_key(row)
+        status = tracking.setdefault(key, {})
+        if status.get("delivered") or status.get("cancelled"):
+            continue
+        status["approved"] = True
+        status.setdefault("inserted_vibra", False)
+        status.setdefault("sent_transport", False)
+        status.setdefault("delivered", False)
+        status.setdefault("cancelled", False)
+        approved_count += 1
+    return approved_count
 
 
 def render_loading_mobile_cards(source, title="Resumo mobile"):
@@ -2288,8 +2402,10 @@ def render_loading_mobile_cards(source, title="Resumo mobile"):
             f'<div><b>Volume</b><br>{liters(row["Comprar (L)"])}</div>'
             f'<div><b>Vibra</b><br>{html_lib.escape(str(row["Prazo Vibra"]))}</div>'
             f'<div><b>Transporte</b><br>{html_lib.escape(str(row["Prazo Transporte"]))}</div>'
+            f'<div><b>Aprovado</b><br>{"Sim" if row.get("Aprovado", False) else "Nao"}</div>'
             f'<div><b>Inserido</b><br>{"Sim" if row["Inserido na Vibra"] else "Nao"}</div>'
             f'<div><b>Enviado</b><br>{"Sim" if row["Enviado ao Transportador"] else "Nao"}</div>'
+            f'<div><b>Final</b><br>{"Entregue" if row.get("Entregue", False) else "Cancelado" if row.get("Cancelado", False) else "-"}</div>'
             '</div>'
             '</div>'
         )
@@ -2311,6 +2427,7 @@ def project_loading_schedule(df, trend, days_ahead=4):
     start = now_local().date() + timedelta(days=1)
     end = start + timedelta(days=days_ahead - 1)
     period_days = [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+    future_orders, _ = active_future_orders_lookup(start=start, end=end)
     rows = []
     if df.empty:
         return pd.DataFrame(rows)
@@ -2333,6 +2450,9 @@ def project_loading_schedule(df, trend, days_ahead=4):
             adjusted_vmd = item["vmd"]
             if capacity <= 0 or adjusted_vmd <= 0:
                 continue
+            incoming_volume = float(future_orders.get((day, station, product), 0.0))
+            if incoming_volume > 0:
+                stock = min(stock + incoming_volume, capacity)
             if day.weekday() == 6:
                 item["stock"] = max(stock - adjusted_vmd, 0)
                 continue
@@ -2381,7 +2501,10 @@ def project_loading_schedule(df, trend, days_ahead=4):
                             "Prioridade": strategy,
                             "Motivo": reason,
                             "Janela de Entrega": "Projecao futura por consumo aceito",
-                            "Observacao": f"Estoque projetado antes da compra: {liters(stock_before)}",
+                            "Observacao": (
+                                f"Estoque projetado antes da compra: {liters(stock_before)}"
+                                + (f" | Ja considera {liters(incoming_volume)} em transito" if incoming_volume > 0 else "")
+                            ),
                         }
                     )
 
@@ -2579,6 +2702,33 @@ def render_tomorrow_loading_cards(cards, days_ahead=4):
             st.rerun()
 
 
+def render_future_orders_panel(days_ahead=7):
+    start = now_local().date()
+    end = start + timedelta(days=max(min(int(days_ahead), 7), 1))
+    _, future_df = active_future_orders_lookup(start=start, end=end)
+    with st.expander("Pedidos futuros considerados no cálculo", expanded=not future_df.empty):
+        st.caption(
+            "Pedidos aprovados, inseridos na Vibra ou enviados ao transportador entram como estoque futuro. "
+            "Marque como entregue ou cancelado no Painel de Carregamentos para liberar novas recomendações quando necessário."
+        )
+        if future_df.empty:
+            st.info("Nenhum pedido futuro aprovado/em trânsito no período.")
+            return
+        st.dataframe(
+            future_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Posto": text_column("Posto"),
+                "Produto": text_column("Produto"),
+                "Volume (L)": number_column("Volume (L)", format="%.0f"),
+                "Aprovado": st.column_config.CheckboxColumn("Aprovado"),
+                "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra"),
+                "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador"),
+            },
+        )
+
+
 def selected_station_from_query():
     return st.session_state.get("selected_loading_station")
 
@@ -2645,7 +2795,7 @@ def render_tomorrow_loading_page(read_only=False):
         "Carregamentos",
         "Cards por posto com sugestão de carga para os próximos dias. Toque em um card para ver a semana sugerida.",
     )
-    df, _, trend, _, weekly_schedule, _ = purchase_context(read_only)
+    df, _, trend, _, _, _ = purchase_context(read_only)
     days_ahead = st.select_slider(
         "Mostrar carregamentos até",
         options=[1, 2, 3, 4, 5, 6, 7],
@@ -2654,16 +2804,34 @@ def render_tomorrow_loading_page(read_only=False):
         help="Escolha o horizonte da programação. O padrão mostra os próximos 4 dias a partir de amanhã.",
     )
     projected_schedule = project_loading_schedule(df, trend, days_ahead)
-    if projected_schedule.empty:
-        projected_schedule = weekly_schedule
     selected_station = selected_station_from_query()
     if selected_station:
         render_station_week_plan(selected_station, projected_schedule)
         return
 
+    action_cols = st.columns([1, 1])
+    if action_cols[0].button(
+        "Aprovar sugestões exibidas",
+        type="primary",
+        use_container_width=True,
+        disabled=projected_schedule.empty,
+        help="Registra as cargas exibidas como aprovadas. A partir disso, elas entram como pedido futuro e evitam recomendação repetida.",
+    ):
+        approved = approve_schedule_orders(projected_schedule, days_ahead)
+        st.success(f"{approved} item(ns) aprovado(s). Eles agora contam como carga futura.")
+        st.rerun()
+    if action_cols[1].button(
+        "Abrir controle Vibra",
+        use_container_width=True,
+        help="Vá para o painel onde você marca inserido na Vibra, enviado ao transportador, entregue ou cancelado.",
+    ):
+        st.session_state.selected_loading_station = None
+        st.session_state.force_page = "Painel de Carregamentos"
+        st.rerun()
     render_daily_loading_summary(daily_loading_summary(projected_schedule, days_ahead))
     cards = loading_schedule_by_station(projected_schedule, days_ahead)
     render_tomorrow_loading_cards(cards, days_ahead)
+    render_future_orders_panel(days_ahead)
 
 
 def render_transport_order(schedule):
@@ -3134,12 +3302,20 @@ def render_loading_orders_page(read_only=False):
     urgent_count = int((visible_df["Status"] == "Urgente").sum())
     risk_count = int((visible_df["Status"] == "Em risco").sum())
     ready_count = int((visible_df["Status"] == "Pronto").sum())
+    transit_count = int(
+        (
+            visible_df["Status"].isin(["Aprovado", "Pronto", "Falta transporte", "Falta Vibra"])
+            | visible_df["Aprovado"]
+            | visible_df["Inserido na Vibra"]
+            | visible_df["Enviado ao Transportador"]
+        ).sum()
+    )
 
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Pedidos", total_orders)
     c2.metric("Urgentes", urgent_count)
     c3.metric("Em risco", risk_count)
-    c4.metric("Prontos", ready_count)
+    c4.metric("Em trânsito", transit_count, f"{ready_count} pronto(s)")
 
     st.markdown("#### Regras operacionais")
     rule_cols = st.columns(2)
@@ -3197,8 +3373,11 @@ def render_loading_orders_page(read_only=False):
                         "Prazo Vibra": text_column("Prazo Vibra"),
                         "Prazo Alterar/Cancelar": text_column("Prazo Alterar/Cancelar"),
                         "Prazo Transporte": text_column("Prazo Transporte"),
+                        "Aprovado": st.column_config.CheckboxColumn("Aprovado", help=help_for_column("Aprovado")),
                         "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra", help=help_for_column("Inserido na Vibra")),
                         "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador", help=help_for_column("Enviado ao Transportador")),
+                        "Entregue": st.column_config.CheckboxColumn("Entregue", help=help_for_column("Entregue")),
+                        "Cancelado": st.column_config.CheckboxColumn("Cancelado", help=help_for_column("Cancelado")),
                         "Status": text_column("Status"),
                         "Observacao Operacional": text_column("Observacao Operacional"),
                     },
@@ -3247,8 +3426,11 @@ def render_loading_orders_page(read_only=False):
             "Prazo Vibra": text_column("Prazo Vibra"),
             "Prazo Alterar/Cancelar": text_column("Prazo Alterar/Cancelar"),
             "Prazo Transporte": text_column("Prazo Transporte"),
+            "Aprovado": st.column_config.CheckboxColumn("Aprovado", help=help_for_column("Aprovado")),
             "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra", help=help_for_column("Inserido na Vibra")),
             "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador", help=help_for_column("Enviado ao Transportador")),
+            "Entregue": st.column_config.CheckboxColumn("Entregue", help=help_for_column("Entregue")),
+            "Cancelado": st.column_config.CheckboxColumn("Cancelado", help=help_for_column("Cancelado")),
             "Status": text_column("Status"),
             "Observacao Operacional": text_column("Observacao Operacional"),
             "Data": None,
@@ -3841,6 +4023,7 @@ def main():
         return
 
     page = render_sidebar()
+    page = st.session_state.pop("force_page", None) or page
     if page == "Carregar Amanhã":
         render_tomorrow_loading_page(read_only=st.session_state.user["role"] == "Gerente")
     elif page == "Painel de Carregamentos":
