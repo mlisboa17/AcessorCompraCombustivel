@@ -1910,6 +1910,7 @@ def loading_status_note(row, now=None):
 def build_loading_orders(schedule):
     columns = [
         "Lote",
+        "Carregamento",
         "Data",
         "Posto",
         "Produto",
@@ -1935,6 +1936,7 @@ def build_loading_orders(schedule):
         row = {
             "Chave": key,
             "Lote": loading_batch(load_date),
+            "Carregamento": f"{short_weekday(item['Data'])} - {item['Data']}",
             "Data": item["Data"],
             "Posto": item["Posto"],
             "Produto": item["Produto"],
@@ -1958,14 +1960,17 @@ def build_loading_orders(schedule):
 
 
 def style_loading_orders(row):
+    station = row.get("Posto", "")
+    station = station if isinstance(station, str) else ""
+    station_color = station_style(station)
     status = row.get("Status", "")
     if status == "Urgente":
-        return ["background-color: rgba(239, 68, 68, .22); border-left: 4px solid #ef4444"] * len(row)
+        return [f"background-color: {station_color['bg']}; border-left: 4px solid #ef4444"] * len(row)
     if status == "Em risco":
-        return ["background-color: rgba(245, 158, 11, .20); border-left: 4px solid #f59e0b"] * len(row)
+        return [f"background-color: {station_color['bg']}; border-left: 4px solid #f59e0b"] * len(row)
     if status in ("Falta transporte", "Falta Vibra", "Pendente"):
-        return ["background-color: rgba(56, 189, 248, .12); border-left: 4px solid #38bdf8"] * len(row)
-    return style_rows_by_station(row)
+        return [f"background-color: {station_color['bg']}; border-left: 4px solid {station_color['accent']}"] * len(row)
+    return [f"background-color: {station_color['bg']}; border-left: 4px solid {station_color['accent']}"] * len(row)
 
 
 def save_loading_tracking(orders_df):
@@ -2503,7 +2508,10 @@ def render_loading_orders_page(read_only=False):
         (tab_final, "Lote Final de Semana"),
     ]:
         with tab:
-            lote_df = dated_source[dated_source["Lote"] == lote_name].drop(columns=["_DataFiltro", "Chave"], errors="ignore")
+            lote_df = dated_source[dated_source["Lote"] == lote_name].drop(
+                columns=["_DataFiltro", "Chave", "Data", "Compartimentos"],
+                errors="ignore",
+            )
             if lote_df.empty:
                 st.info("Nenhum pedido neste lote dentro do periodo selecionado.")
             else:
@@ -2513,7 +2521,6 @@ def render_loading_orders_page(read_only=False):
                     use_container_width=True,
                     column_config={
                         "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-                        "Compartimentos": st.column_config.NumberColumn(format="%d"),
                     },
                 )
 
@@ -2533,6 +2540,7 @@ def render_loading_orders_page(read_only=False):
         use_container_width=True,
         disabled=[
             "Lote",
+            "Carregamento",
             "Data",
             "Posto",
             "Produto",
@@ -2547,9 +2555,10 @@ def render_loading_orders_page(read_only=False):
         ],
         column_config={
             "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-            "Compartimentos": st.column_config.NumberColumn(format="%d"),
             "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra"),
             "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador"),
+            "Data": None,
+            "Compartimentos": None,
             "Chave": None,
         },
     )
