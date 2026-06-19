@@ -2820,7 +2820,6 @@ def allowed_station():
 
 def render_sidebar():
     user = st.session_state.user
-    market = get_market_data()
     st.sidebar.markdown(
         """
         <div class="sidebar-brand">
@@ -2850,47 +2849,20 @@ def render_sidebar():
     if user["role"] == "Sócio":
         page_labels = {
             "Carregamentos": "Carregar Amanhã",
-            "Visão Geral": "Painel de Compras",
-            "Painel de Carregamentos": "Painel de Carregamentos",
-            "Medição de Estoque": "Medição de Estoque",
-            "Programação Semanal": "Programação Semanal",
-            "Ordem de Transporte": "Ordem de Transporte",
-            "Mercado e Preço": "Mercado e Preço",
-            "Financeiro": "Financeiro",
-            "Postos e Tanques": "Cadastro de Postos e Tanques",
-            "Configurações": "Configurações e Vendas",
+            "Pedidos Vibra": "Painel de Carregamentos",
+            "Estoque": "Medição de Estoque",
+            "Programação": "Programação Operacional",
+            "Análises": "Análises",
+            "Cadastros": "Cadastros",
         }
     else:
         page_labels = {"Carregamentos": "Carregar Amanhã", "Painel de Consulta": "Painel de Consulta"}
-
     st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
     st.session_state.compact_mode = st.sidebar.toggle(
         "Foco operacional",
         value=st.session_state.get("compact_mode", True),
         help="Mostra primeiro o que precisa de ação e deixa detalhes em blocos secundários.",
-    )
-
-    st.sidebar.markdown('<div class="sidebar-section-label">Status rápido</div>', unsafe_allow_html=True)
-    st.sidebar.markdown(
-        f"""
-        <div class="sidebar-panel">
-            <b>Mercado:</b> {html_lib.escape(str(market.get("trend_label", market["trend"])))}<br>
-            <span style="color:#94a3b8;">Atualizado: {html_lib.escape(st.session_state.last_market_update or "pendente")}</span><br>
-            <span style="color:#94a3b8;">Banco: {html_lib.escape(supabase_status())}</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.sidebar.button("Atualizar mercado", use_container_width=True):
-        with st.spinner("Atualizando mercado..."):
-            get_market_data(force=True)
-        st.rerun()
-
-    st.sidebar.markdown('<div class="sidebar-section-label">Logística</div>', unsafe_allow_html=True)
-    st.sidebar.caption(
-        f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia - {liters(TRUCK_CAPACITY_LITERS)} por caminhão - "
-        f"{liters(DAILY_DELIVERY_CAPACITY_LITERS)} por dia"
     )
 
     if st.sidebar.button("Sair", use_container_width=True):
@@ -3341,6 +3313,39 @@ def render_finance_page(read_only=False):
     render_financial_control(weekly_schedule, price_delta)
     render_decision_history(exec_df, weekly_schedule, price_delta)
 
+
+def render_programming_hub(read_only=False):
+    header("Programação", "Planeje a semana e gere a mensagem operacional para transporte.")
+    tab_week, tab_transport = st.tabs(["Semana", "Transporte"])
+    with tab_week:
+        _, _, _, _, weekly_schedule, base_calendar = purchase_context(read_only)
+        render_weekly_programming(weekly_schedule, base_calendar)
+    with tab_transport:
+        _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
+        if weekly_schedule.empty:
+            st.info("Nenhuma carga programada para transporte.")
+        else:
+            render_transport_order(weekly_schedule)
+
+
+def render_analysis_hub(read_only=False):
+    header("Análises", "Resumo executivo, mercado, preço e impacto financeiro.")
+    tab_overview, tab_market, tab_finance = st.tabs(["Resumo", "Mercado", "Financeiro"])
+    with tab_overview:
+        render_main_panel(read_only=read_only)
+    with tab_market:
+        render_market_page(read_only=read_only)
+    with tab_finance:
+        render_finance_page(read_only=read_only)
+
+
+def render_admin_hub():
+    header("Cadastros", "Administre postos, tanques, vendas, usuários e integrações.")
+    tab_network, tab_settings = st.tabs(["Postos e Tanques", "Configurações"])
+    with tab_network:
+        render_network_admin()
+    with tab_settings:
+        render_settings_sales()
 
 def render_network_admin():
     header(
@@ -3838,24 +3843,16 @@ def main():
     page = render_sidebar()
     if page == "Carregar Amanhã":
         render_tomorrow_loading_page(read_only=st.session_state.user["role"] == "Gerente")
-    elif page == "Painel de Compras":
-        render_main_panel(read_only=False)
     elif page == "Painel de Carregamentos":
         render_loading_orders_page(read_only=False)
     elif page == "Medição de Estoque":
         render_measurement_page(read_only=False)
-    elif page == "Programação Semanal":
-        render_programming_page(read_only=False)
-    elif page == "Ordem de Transporte":
-        render_transport_page(read_only=False)
-    elif page == "Mercado e Preço":
-        render_market_page(read_only=False)
-    elif page == "Financeiro":
-        render_finance_page(read_only=False)
-    elif page == "Cadastro de Postos e Tanques":
-        render_network_admin()
-    elif page == "Configurações e Vendas":
-        render_settings_sales()
+    elif page == "Programação Operacional":
+        render_programming_hub(read_only=False)
+    elif page == "Análises":
+        render_analysis_hub(read_only=False)
+    elif page == "Cadastros":
+        render_admin_hub()
     else:
         render_main_panel(read_only=True)
 
