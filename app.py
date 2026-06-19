@@ -348,15 +348,64 @@ def inject_css():
                 font-size: .9rem;
             }
 
+            .mobile-only {
+                display: none;
+            }
+
+            .loading-mobile-card {
+                border: 1px solid var(--line);
+                border-radius: 8px;
+                padding: 12px;
+                margin-bottom: 10px;
+                background: rgba(15, 23, 42, .90);
+            }
+
+            .loading-mobile-top {
+                display: flex;
+                justify-content: space-between;
+                gap: 10px;
+                align-items: flex-start;
+                margin-bottom: 8px;
+            }
+
+            .loading-mobile-title {
+                font-weight: 800;
+                color: #f8fafc;
+                line-height: 1.2;
+            }
+
+            .loading-mobile-status {
+                border-radius: 999px;
+                padding: 4px 8px;
+                font-size: .75rem;
+                font-weight: 800;
+                white-space: nowrap;
+                background: rgba(148, 163, 184, .16);
+                border: 1px solid rgba(148, 163, 184, .25);
+            }
+
+            .loading-mobile-grid {
+                display: grid;
+                grid-template-columns: 1fr 1fr;
+                gap: 6px 10px;
+                color: #d1d5db;
+                font-size: .86rem;
+            }
+
+            .loading-mobile-grid b {
+                color: #f8fafc;
+            }
+
             @media (max-width: 640px) {
                 .block-container {
-                    padding-left: .75rem;
-                    padding-right: .75rem;
-                    padding-top: 1rem;
+                    padding-left: .55rem;
+                    padding-right: .55rem;
+                    padding-top: .75rem;
+                    max-width: 100%;
                 }
 
                 h1 {
-                    font-size: 1.55rem;
+                    font-size: 1.35rem;
                     line-height: 1.2;
                 }
 
@@ -383,19 +432,68 @@ def inject_css():
                 }
 
                 div[data-testid="stMetric"] {
-                    padding: 10px;
+                    padding: 9px;
                 }
 
                 div[data-testid="stMetricValue"] {
-                    font-size: 1.25rem;
+                    font-size: 1.08rem;
                 }
 
                 div[data-testid="stDataFrame"] {
-                    max-height: 430px;
+                    max-height: 360px;
+                    font-size: .78rem;
                 }
 
                 [data-testid="stSidebar"] {
                     border-right: 0;
+                }
+
+                .mobile-card-grid {
+                    grid-template-columns: 1fr;
+                    gap: 10px;
+                }
+
+                .mobile-summary-card {
+                    padding: 12px;
+                }
+
+                .priority-strip {
+                    grid-template-columns: 1fr;
+                    gap: 8px;
+                }
+
+                .priority-card {
+                    padding: 10px 12px;
+                }
+
+                .station-band {
+                    padding: 10px;
+                    margin: 8px 0;
+                }
+
+                .station-chip {
+                    font-size: .82rem;
+                    margin-right: 6px;
+                }
+
+                .mobile-only {
+                    display: block;
+                }
+
+                div[data-testid="stHorizontalBlock"] {
+                    gap: .45rem;
+                }
+
+                .stTabs [data-baseweb="tab-list"] {
+                    gap: 4px;
+                    overflow-x: auto;
+                }
+
+                .stTabs [data-baseweb="tab"] {
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    font-size: .82rem;
+                    white-space: nowrap;
                 }
             }
         </style>
@@ -1985,6 +2083,33 @@ def save_loading_tracking(orders_df):
         }
 
 
+def render_loading_mobile_cards(source, title="Resumo mobile"):
+    if source.empty:
+        return
+    cards = [f'<div class="mobile-only"><h4>{html_lib.escape(title)}</h4>']
+    for _, row in source.head(12).iterrows():
+        style = station_style(row["Posto"])
+        status = html_lib.escape(str(row["Status"]))
+        cards.append(
+            f'<div class="loading-mobile-card" style="background:{style["bg"]}; border-color:{style["border"]}; border-left:5px solid {style["accent"]};">'
+            '<div class="loading-mobile-top">'
+            f'<div class="loading-mobile-title">{html_lib.escape(str(row["Posto"]))}<br>{html_lib.escape(str(row["Produto"]))}</div>'
+            f'<div class="loading-mobile-status">{status}</div>'
+            '</div>'
+            '<div class="loading-mobile-grid">'
+            f'<div><b>Data</b><br>{html_lib.escape(str(row.get("Carregamento", row.get("Data", "-"))))}</div>'
+            f'<div><b>Volume</b><br>{liters(row["Comprar (L)"])}</div>'
+            f'<div><b>Vibra</b><br>{html_lib.escape(str(row["Prazo Vibra"]))}</div>'
+            f'<div><b>Transporte</b><br>{html_lib.escape(str(row["Prazo Transporte"]))}</div>'
+            f'<div><b>Inserido</b><br>{"Sim" if row["Inserido na Vibra"] else "Nao"}</div>'
+            f'<div><b>Enviado</b><br>{"Sim" if row["Enviado ao Transportador"] else "Nao"}</div>'
+            '</div>'
+            '</div>'
+        )
+    cards.append("</div>")
+    st.markdown("".join(cards), unsafe_allow_html=True)
+
+
 def render_transport_order(schedule):
     st.markdown("#### Ordem para transporte")
     if schedule.empty:
@@ -2515,6 +2640,7 @@ def render_loading_orders_page(read_only=False):
             if lote_df.empty:
                 st.info("Nenhum pedido neste lote dentro do periodo selecionado.")
             else:
+                render_loading_mobile_cards(lote_df, lote_name)
                 st.dataframe(
                     lote_df.style.apply(style_loading_orders, axis=1),
                     hide_index=True,
@@ -2533,6 +2659,11 @@ def render_loading_orders_page(read_only=False):
         st.warning("Nenhum pedido encontrado para os filtros selecionados.")
         return
 
+    st.markdown("#### Controle operacional")
+    render_loading_mobile_cards(
+        source.drop(columns=["_DataFiltro", "Chave", "Data", "Compartimentos"], errors="ignore"),
+        "Pedidos filtrados",
+    )
     editable = source.drop(columns=["_DataFiltro"]).copy()
     edited = st.data_editor(
         editable,
