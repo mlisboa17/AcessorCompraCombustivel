@@ -37,7 +37,6 @@ if load_dotenv is not None:
 
 st.set_page_config(
     page_title="FuelGuard360 | Painel de Compras",
-    page_icon="⛽",
     layout="wide",
     initial_sidebar_state="expanded",
 )
@@ -127,6 +126,17 @@ def inject_css():
                     radial-gradient(circle at top left, rgba(56, 189, 248, .10), transparent 30%),
                     linear-gradient(180deg, #07111f 0%, #0b1120 100%);
                 color: var(--text);
+            }
+
+            #MainMenu,
+            footer,
+            header,
+            [data-testid="stToolbar"],
+            [data-testid="stDecoration"],
+            [data-testid="stStatusWidget"],
+            .stDeployButton {
+                display: none !important;
+                visibility: hidden !important;
             }
 
             [data-testid="stSidebar"] {
@@ -940,7 +950,7 @@ def login_screen():
     left, mid, right = st.columns([1.2, 1, 1.2])
     with mid:
         st.markdown('<div class="top-title">', unsafe_allow_html=True)
-        st.title("⛽ FuelGuard360")
+        st.title("FuelGuard360")
         st.markdown(
             '<p class="subtitle">Painel corporativo para decisão de compras, estoque e autonomia da rede.</p>',
             unsafe_allow_html=True,
@@ -1073,13 +1083,13 @@ def trend_factor(consumption_trend):
 
 def stock_strategy(coverage, adjusted_vmd, capacity):
     if adjusted_vmd <= 0:
-        return "🟡 Estoque normal"
+        return "Estoque normal"
     giro = adjusted_vmd / capacity if capacity else 0
     if coverage < 3 or giro >= 0.22:
-        return "🔴 Estoque alto"
+        return "Estoque alto"
     if coverage > 7 and giro <= 0.10:
-        return "🟢 Estoque baixo"
-    return "🟡 Estoque normal"
+        return "Estoque baixo"
+    return "Estoque normal"
 
 
 def strategy_target_days(strategy, consumption_trend):
@@ -1459,7 +1469,7 @@ def render_financial_control(weekly_schedule, price_delta):
     st.markdown("#### Controle financeiro")
     finance_df = build_financial_schedule(weekly_schedule, price_delta)
     if finance_df.empty:
-        st.info("Sem compras programadas para projetar boletos e caixa.", icon="💳")
+        st.info("Sem compras programadas para projetar boletos e caixa.")
         return
     st.dataframe(
         finance_df,
@@ -1507,7 +1517,7 @@ def render_decision_history(exec_df, weekly_schedule, price_delta):
             },
         )
     else:
-        st.info("Nenhuma decisão registrada nesta sessão.", icon="🧾")
+        st.info("Nenhuma decisão registrada nesta sessão.")
 
 
 def donut_chart(station, station_df):
@@ -2113,7 +2123,7 @@ def render_loading_mobile_cards(source, title="Resumo mobile"):
 def render_transport_order(schedule):
     st.markdown("#### Ordem para transporte")
     if schedule.empty:
-        st.info("Sem programação de transporte para exibir.", icon="🚚")
+        st.info("Sem programação de transporte para exibir.")
         return
 
     source = schedule.copy()
@@ -2178,7 +2188,7 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
         source = source.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(6)
 
     if source.empty:
-        st.info("Sem dados para exibir no resumo.", icon="📱")
+        st.info("Sem dados para exibir no resumo.")
         return
 
     schedule_lookup = {}
@@ -2193,16 +2203,16 @@ def render_mobile_recommendation_cards(exec_df, weekly_schedule):
     for _, row in source.iterrows():
         arrival = schedule_lookup.get((row["Posto"], row["Produto"]), {"label": row.get("Quando", "-"), "date": "-"})
         volume = liters(row["Volume"]) if float(row["Volume"]) > 0 else "0 L"
-        title = html_lib.escape(f"{row['Posto']} · {row['Produto']}")
+        title = html_lib.escape(f"{row['Posto']} - {row['Produto']}")
         buy = html_lib.escape(str(row["Comprar?"]))
-        arrival_text = html_lib.escape(f"{arrival['date']} · {arrival['label']}")
+        arrival_text = html_lib.escape(f"{arrival['date']} - {arrival['label']}")
         reason = html_lib.escape(str(row["Motivo"]))
         style = station_style(row["Posto"])
         html_parts.append(
             f'<div class="mobile-summary-card" style="background:{style["bg"]}; border-color:{style["border"]}; border-left: 5px solid {style["accent"]};">'
             f"<h4>{title}</h4>"
-            f"<p><b>Comprar?</b> {buy} · <b>Volume:</b> {volume}</p>"
-            f"<p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias · <b>Score:</b> {row['Score']:.0f}</p>"
+            f"<p><b>Comprar?</b> {buy} - <b>Volume:</b> {volume}</p>"
+            f"<p><b>Cobertura:</b> {row['Cobertura (dias)']:.1f} dias - <b>Score:</b> {row['Score']:.0f}</p>"
             f"<p><b>Chegada:</b> {arrival_text}</p>"
             f"<p><b>Motivo:</b> {reason}</p>"
             "</div>"
@@ -2268,7 +2278,7 @@ def render_sidebar():
     st.sidebar.markdown(
         """
         <div class="sidebar-brand">
-            <div class="sidebar-brand-title">⛽ FuelGuard360</div>
+            <div class="sidebar-brand-title">FuelGuard360</div>
             <div class="sidebar-brand-subtitle">Compras, estoque e margem em um só painel</div>
         </div>
         """,
@@ -2293,18 +2303,18 @@ def render_sidebar():
 
     if user["role"] == "Sócio":
         page_labels = {
-            "📊 Visão Geral": "Painel de Compras",
-            "📦 Painel de Carregamentos": "Painel de Carregamentos",
-            "🧾 Medição de Estoque": "Medição de Estoque",
-            "📅 Programação Semanal": "Programação Semanal",
-            "🚚 Ordem de Transporte": "Ordem de Transporte",
-            "🌎 Mercado e Preço": "Mercado e Preço",
-            "💳 Financeiro": "Financeiro",
-            "🏪 Postos e Tanques": "Cadastro de Postos e Tanques",
-            "⚙️ Configurações": "Configurações e Vendas",
+            "Visão Geral": "Painel de Compras",
+            "Painel de Carregamentos": "Painel de Carregamentos",
+            "Medição de Estoque": "Medição de Estoque",
+            "Programação Semanal": "Programação Semanal",
+            "Ordem de Transporte": "Ordem de Transporte",
+            "Mercado e Preço": "Mercado e Preço",
+            "Financeiro": "Financeiro",
+            "Postos e Tanques": "Cadastro de Postos e Tanques",
+            "Configurações": "Configurações e Vendas",
         }
     else:
-        page_labels = {"📊 Painel de Consulta": "Painel de Consulta"}
+        page_labels = {"Painel de Consulta": "Painel de Consulta"}
 
     st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
@@ -2332,7 +2342,7 @@ def render_sidebar():
 
     st.sidebar.markdown('<div class="sidebar-section-label">Logística</div>', unsafe_allow_html=True)
     st.sidebar.caption(
-        f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia · {liters(TRUCK_CAPACITY_LITERS)} por caminhão · "
+        f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia - {liters(TRUCK_CAPACITY_LITERS)} por caminhão - "
         f"{liters(DAILY_DELIVERY_CAPACITY_LITERS)} por dia"
     )
 
@@ -2348,15 +2358,15 @@ def render_market_signal(market):
     trend = market["trend"]
     if trend == "ALTA":
         css = "signal-up"
-        title = "📈 Tendência de ALTA: avaliar compra antes do aumento"
+        title = "Tendência de ALTA: avaliar compra antes do aumento"
         text = "Antecipe somente os produtos com cobertura dentro da janela econômica ou risco de falta, respeitando espaço de tanque e logística."
     elif trend == "BAIXA":
         css = "signal-down"
-        title = "📉 Tendência de BAIXA: esperar quando houver cobertura"
+        title = "Tendência de BAIXA: esperar quando houver cobertura"
         text = "Se a cobertura permitir, adie para capturar preço menor. Se houver risco de falta, compre só o mínimo de segurança."
     else:
         css = "signal-neutral"
-        title = "➖ Tendência NEUTRA: manter disciplina de cobertura"
+        title = "Tendência NEUTRA: manter disciplina de cobertura"
         text = "Sem sinal macro forte. A recomendação usa alvo operacional moderado de 5 dias de cobertura."
 
     st.markdown(
@@ -2471,7 +2481,7 @@ def render_weekly_programming(weekly_schedule, base_calendar):
     with st.expander("Calendário e capacidade da base", expanded=False):
         st.dataframe(base_calendar, hide_index=True, use_container_width=True)
     if weekly_schedule.empty:
-        st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
+        st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.")
         return weekly_schedule
     st.caption("Mostrando por padrão os próximos 3 dias, com filtros por posto, produto e quantidade.")
     weekly_schedule_view = filter_weekly_schedule(weekly_schedule)
@@ -2490,7 +2500,7 @@ def render_weekly_programming(weekly_schedule, base_calendar):
 
 
 def render_main_panel(read_only=False):
-    title = "📊 Painel de Consulta" if read_only else "📊 Visão Geral FuelGuard360"
+    title = "Painel de Consulta" if read_only else "Visão Geral FuelGuard360"
     subtitle = (
         "Visão operacional do posto, autonomia e risco de ruptura."
         if read_only
@@ -2505,10 +2515,10 @@ def render_main_panel(read_only=False):
     risk_count = int((df["Dias de Autonomia"] < 3).sum()) if not df.empty else 0
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("🛢️ Estoque Total", liters(total_stock))
-    c2.metric("📆 Cobertura Média", f"{avg_autonomy:.1f} dias")
-    c3.metric("⚠️ Alertas de Risco", risk_count)
-    c4.metric("🌎 Tendência Macro", trend)
+    c1.metric("Estoque Total", liters(total_stock))
+    c2.metric("Cobertura Média", f"{avg_autonomy:.1f} dias")
+    c3.metric("Alertas de Risco", risk_count)
+    c4.metric("Tendência Macro", trend)
     render_station_color_legend(df)
 
     render_priority_overview(exec_df, weekly_schedule)
@@ -2525,7 +2535,7 @@ def render_main_panel(read_only=False):
             st.markdown(
                 f"""
                 <div class="signal-card signal-up">
-                    <div class="signal-title">{row['Posto']} · {row['Produto']}</div>
+                    <div class="signal-title">{row['Posto']} - {row['Produto']}</div>
                     <p class="signal-text">Comprar <b>{liters(row['Volume'])}</b>. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
                 </div>
                 """.replace(",", "."),
@@ -2533,7 +2543,7 @@ def render_main_panel(read_only=False):
             )
 
     if week_df.empty:
-        st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
+        st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.")
 
     with st.expander("Tabela executiva completa", expanded=not st.session_state.get("compact_mode", True)):
         exec_df_view = filter_table(exec_df, "executive_table", "Filtros da saída executiva")
@@ -2553,22 +2563,22 @@ def render_main_panel(read_only=False):
 
 
 def render_measurement_page(read_only=False):
-    header("🧾 Medição de Estoque", "Atualize a litragem atual por posto e produto.")
+    header("Medição de Estoque", "Atualize a litragem atual por posto e produto.")
     df, _, _, _, _, _ = purchase_context(read_only)
     render_stock_measurement(df, read_only)
 
 
 def render_programming_page(read_only=False):
-    header("📅 Programação Semanal", "Compra planejada por data de chegada, respeitando domingo fechado e múltiplos de 5.000 L.")
+    header("Programação Semanal", "Compra planejada por data de chegada, respeitando domingo fechado e múltiplos de 5.000 L.")
     _, _, _, _, weekly_schedule, base_calendar = purchase_context(read_only)
     render_weekly_programming(weekly_schedule, base_calendar)
 
 
 def render_transport_page(read_only=False):
-    header("🚚 Ordem de Transporte", "Tabela objetiva para repassar ao transportador por posto, data, produto e volume.")
+    header("Ordem de Transporte", "Tabela objetiva para repassar ao transportador por posto, data, produto e volume.")
     _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
     if weekly_schedule.empty:
-        st.info("Nenhuma carga programada para transporte.", icon="✅")
+        st.info("Nenhuma carga programada para transporte.")
     else:
         render_transport_order(weekly_schedule)
 
@@ -2581,7 +2591,7 @@ def render_loading_orders_page(read_only=False):
     _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
     orders_df = build_loading_orders(weekly_schedule)
     if orders_df.empty:
-        st.info("Nenhum carregamento programado para controlar.", icon="✅")
+        st.info("Nenhum carregamento programado para controlar.")
         return
 
     visible_df = orders_df.drop(columns=["Chave"]).copy()
@@ -2601,12 +2611,10 @@ def render_loading_orders_page(read_only=False):
     rule_cols[0].info(
         "Lote Inicio de Semana: carregamentos de segunda, terca e quarta. "
         "Inserir na Vibra e avisar transporte ate sexta-feira 12:00.",
-        icon="📌",
     )
     rule_cols[1].info(
         "Lote Final de Semana: carregamentos de quinta, sexta e sabado. "
         "Inserir na Vibra e avisar transporte ate terca-feira 12:00.",
-        icon="📌",
     )
     st.caption(
         "Regra Vibra: pedido ate 16:00 do dia anterior. Para carregamento de segunda, sabado ate 11:00. "
@@ -2719,12 +2727,12 @@ def render_loading_orders_page(read_only=False):
 
 
 def render_market_page(read_only=False):
-    header("🌎 Mercado e Preço", "Radar de Brent, dólar e fontes comerciais para decidir antecipar ou esperar.")
+    header("Mercado e Preço", "Radar de Brent, dólar e fontes comerciais para decidir antecipar ou esperar.")
     df, market, trend, _, _, _ = purchase_context(read_only)
     render_market_signal(market)
     m1, m2, m3, m4 = st.columns([1, 1, 1, 1.1])
-    m1.metric("💵 Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
-    m2.metric("🛢️ Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
+    m1.metric("Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
+    m2.metric("Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
     m3.metric("Sinal", trend)
     if m4.button("Atualizar mercado", use_container_width=True, help="Atualiza Brent e dólar agora. O app também atualiza automaticamente a cada 3 horas."):
         with st.spinner("Atualizando mercado..."):
@@ -2744,7 +2752,7 @@ def render_market_page(read_only=False):
 
 
 def render_finance_page(read_only=False):
-    header("💳 Financeiro", "Simule ganho de preço, prazo de boleto e histórico de decisões.")
+    header("Financeiro", "Simule ganho de preço, prazo de boleto e histórico de decisões.")
     _, _, _, exec_df, weekly_schedule, _ = purchase_context(read_only)
     price_delta = render_price_simulator(exec_df, weekly_schedule)
     render_financial_control(weekly_schedule, price_delta)
@@ -2753,7 +2761,7 @@ def render_finance_page(read_only=False):
 
 def render_network_admin():
     header(
-        "🏪 Cadastro de Postos e Tanques",
+        "Cadastro de Postos e Tanques",
         "Gerencie a rede, capacidades, estoque inicial e venda média diária por produto.",
     )
 
@@ -3156,12 +3164,12 @@ def render_user_crud():
 
 def render_settings_sales():
     header(
-        "⚙️ Configurações e Vendas",
+        "Configurações e Vendas",
         "Importe relatórios de vendas, recalcule VMD e consulte os acessos internos.",
     )
 
     st.subheader("Banco de dados")
-    st.info(supabase_status(), icon="🗄️")
+    st.info(supabase_status())
     with st.expander("Como configurar Supabase", expanded=False):
         st.markdown(
             """
@@ -3233,7 +3241,6 @@ def render_settings_sales():
     render_user_crud()
     st.info(
         "Os usuários ficam em memória durante a sessão do Streamlit. Para ambiente definitivo, o próximo passo é persistir em banco ou Streamlit Secrets.",
-        icon="🔐",
     )
 
 
@@ -3270,3 +3277,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
