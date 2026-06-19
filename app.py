@@ -2307,13 +2307,15 @@ def priority_from_score(score):
     return "Baixa", 2
 
 
-def tomorrow_schedule_by_station(weekly_schedule):
+def loading_schedule_by_station(weekly_schedule, days_ahead=4):
     if weekly_schedule.empty:
         return []
-    tomorrow = now_local().date() + timedelta(days=1)
+    days_ahead = max(min(int(days_ahead), 7), 1)
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=days_ahead - 1)
     source = weekly_schedule.copy()
     source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
-    source = source[source["_DataFiltro"].dt.date == tomorrow].copy()
+    source = source[source["_DataFiltro"].dt.date.between(start, end)].copy()
     if source.empty:
         return []
 
@@ -2323,7 +2325,7 @@ def tomorrow_schedule_by_station(weekly_schedule):
         priority, rank = priority_from_score(max_score)
         products = []
         total_volume = 0
-        for _, row in station_df.sort_values(["Score", "Produto"], ascending=[False, True]).iterrows():
+        for _, row in station_df.sort_values(["_DataFiltro", "Score", "Produto"], ascending=[True, False, True]).iterrows():
             volume = float(row["Comprar (L)"])
             total_volume += volume
             products.append(
@@ -2331,6 +2333,8 @@ def tomorrow_schedule_by_station(weekly_schedule):
                     "name": row["Produto"],
                     "code": product_transport_code(row["Produto"]),
                     "volume": volume,
+                    "date": row["Data"],
+                    "weekday": short_weekday(row["Data"]),
                 }
             )
         cards.append(
@@ -2341,14 +2345,15 @@ def tomorrow_schedule_by_station(weekly_schedule):
                 "score": max_score,
                 "products": products,
                 "total_volume": total_volume,
-                "date": tomorrow.strftime("%d/%m/%Y"),
-                "weekday": short_weekday(tomorrow.strftime("%d/%m/%Y")),
+                "start_date": start.strftime("%d/%m/%Y"),
+                "end_date": end.strftime("%d/%m/%Y"),
+                "days_ahead": days_ahead,
             }
         )
     return sorted(cards, key=lambda item: (item["priority_rank"], -item["score"], item["station"]))
 
 
-def render_tomorrow_loading_cards(cards):
+def render_tomorrow_loading_cards(cards, days_ahead=4):
     if not cards:
         st.info("Nenhum carregamento sugerido para amanhã com a programação atual.")
         return
@@ -2365,7 +2370,7 @@ def render_tomorrow_loading_cards(cards):
         for product in card["products"]:
             product_rows.append(
                 '<div class="tomorrow-product-row">'
-                f'<span>{html_lib.escape(product["code"])}</span>'
+                f'<span>{html_lib.escape(product["weekday"])} {html_lib.escape(product["date"][:5])} - {html_lib.escape(product["code"])}</span>'
                 f'<span>{liters(product["volume"])}</span>'
                 "</div>"
             )
@@ -2377,12 +2382,12 @@ def render_tomorrow_loading_cards(cards):
             f'<div class="tomorrow-card-title">{html_lib.escape(card["station"])}</div>'
             f'<div class="priority-pill {priority_class}">{html_lib.escape(card["priority"])}</div>'
             '</div>'
-            '<div class="small-muted">Carregar amanhã</div>'
+            f'<div class="small-muted">Carregar ate {int(days_ahead)} dia(s) para frente</div>'
             '<div class="tomorrow-product-list">'
             + "".join(product_rows) +
             '</div>'
             '<div class="tomorrow-card-footer">'
-            f'<span>{html_lib.escape(card["weekday"])} - {html_lib.escape(card["date"])}</span>'
+            f'<span>{html_lib.escape(card["start_date"])} a {html_lib.escape(card["end_date"])}</span>'
             f'<strong>{liters(card["total_volume"])}</strong>'
             '</div>'
             '</a>'
@@ -2458,8 +2463,8 @@ def render_station_week_plan(station, weekly_schedule):
 
 def render_tomorrow_loading_page(read_only=False):
     header(
-        "Carregar Amanhã",
-        "Cards por posto com sugestão de carga para amanhã. Toque em um card para ver a semana sugerida.",
+        "Carregamentos",
+        "Cards por posto com sugestão de carga para os próximos dias. Toque em um card para ver a semana sugerida.",
     )
     _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
     selected_station = selected_station_from_query()
@@ -2467,8 +2472,15 @@ def render_tomorrow_loading_page(read_only=False):
         render_station_week_plan(selected_station, weekly_schedule)
         return
 
-    cards = tomorrow_schedule_by_station(weekly_schedule)
-    render_tomorrow_loading_cards(cards)
+    days_ahead = st.select_slider(
+        "Mostrar carregamentos até",
+        options=[1, 2, 3, 4, 5, 6, 7],
+        value=4,
+        format_func=lambda value: f"{value} dia(s) para frente",
+        help="Escolha o horizonte da programação. O padrão mostra os próximos 4 dias a partir de amanhã.",
+    )
+    cards = loading_schedule_by_station(weekly_schedule, days_ahead)
+    render_tomorrow_loading_cards(cards, days_ahead)
 
 
 def render_transport_order(schedule):
@@ -2654,7 +2666,7 @@ def render_sidebar():
 
     if user["role"] == "Sócio":
         page_labels = {
-            "Carregar Amanhã": "Carregar Amanhã",
+            "Carregamentos": "Carregar Amanhã",
             "Visão Geral": "Painel de Compras",
             "Painel de Carregamentos": "Painel de Carregamentos",
             "Medição de Estoque": "Medição de Estoque",
@@ -2666,7 +2678,7 @@ def render_sidebar():
             "Configurações": "Configurações e Vendas",
         }
     else:
-        page_labels = {"Carregar Amanhã": "Carregar Amanhã", "Painel de Consulta": "Painel de Consulta"}
+        page_labels = {"Carregamentos": "Carregar Amanhã", "Painel de Consulta": "Painel de Consulta"}
 
     st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
