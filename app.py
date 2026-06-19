@@ -2306,6 +2306,87 @@ def priority_from_score(score):
     return "Baixa", 2
 
 
+def project_loading_schedule(df, trend, days_ahead=4):
+    days_ahead = max(min(int(days_ahead), 7), 1)
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=days_ahead - 1)
+    period_days = [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+    rows = []
+    if df.empty:
+        return pd.DataFrame(rows)
+
+    projected = {}
+    for _, row in df.iterrows():
+        key = (row["Posto"], row["Produto"])
+        projected[key] = {
+            "capacity": float(row["Capacidade (L)"]),
+            "stock": float(row["Estoque Atual (L)"]),
+            "vmd": max(float(row["VMD (L/dia)"]) * trend_factor(consumption_trend_for(row)), 0),
+            "payment_term_days": int(row.get("Prazo Financeiro (dias)", 0)),
+            "consumption_trend": consumption_trend_for(row),
+        }
+
+    for day in period_days:
+        for (station, product), item in projected.items():
+            capacity = item["capacity"]
+            stock = max(item["stock"], 0)
+            adjusted_vmd = item["vmd"]
+            if capacity <= 0 or adjusted_vmd <= 0:
+                continue
+
+            coverage = stock / adjusted_vmd
+            lead_time_days = 2
+            safety_days = 1.5 if item["consumption_trend"] == "Alta" else 1.0
+            reorder_point_days = lead_time_days + safety_days
+            strategy = stock_strategy(coverage, adjusted_vmd, capacity)
+            target_days = strategy_target_days(strategy, item["consumption_trend"])
+            if trend == "ALTA":
+                target_days = min(max(target_days + 2, 5), 7)
+            elif trend == "BAIXA":
+                target_days = max(target_days - 1, 3)
+
+            shortage_risk = coverage <= reorder_point_days
+            price_opportunity = trend == "ALTA" and coverage <= target_days + 1
+            headroom = max(capacity - stock, 0)
+            if shortage_risk or price_opportunity:
+                if trend == "BAIXA" and shortage_risk:
+                    target_stock = min(capacity, adjusted_vmd * reorder_point_days)
+                    reason = "Comprar minimo e aguardar baixa"
+                elif shortage_risk:
+                    target_stock = min(capacity, adjusted_vmd * target_days)
+                    reason = "Risco de falta"
+                else:
+                    target_stock = min(capacity, adjusted_vmd * target_days)
+                    reason = "Alta prevista: comprar antes do aumento"
+                volume = round_to_truck_compartment(max(target_stock - stock, 0), headroom)
+                if volume > 0:
+                    stock_before = stock
+                    stock = min(stock + volume, capacity)
+                    score = purchase_score(coverage, reorder_point_days, trend, reason, item["payment_term_days"], volume)
+                    date_text = day.strftime("%d/%m/%Y")
+                    rows.append(
+                        {
+                            "Chegada Prevista": f"{short_weekday(date_text)} {day.strftime('%d/%m')}",
+                            "Data": date_text,
+                            "Posto": station,
+                            "Produto": product,
+                            "Comprar (L)": float(volume),
+                            "Compartimentos": int(volume / TRUCK_COMPARTMENT_LITERS),
+                            "Autonomia Atual": coverage,
+                            "Score": score,
+                            "Prazo Financeiro (dias)": item["payment_term_days"],
+                            "Prioridade": strategy,
+                            "Motivo": reason,
+                            "Janela de Entrega": "Projecao futura por consumo aceito",
+                            "Observacao": f"Estoque projetado antes da compra: {liters(stock_before)}",
+                        }
+                    )
+
+            item["stock"] = max(stock - adjusted_vmd, 0)
+
+    return pd.DataFrame(rows)
+
+
 def loading_schedule_by_station(weekly_schedule, days_ahead=4):
     if weekly_schedule.empty:
         return []
@@ -2561,12 +2642,7 @@ def render_tomorrow_loading_page(read_only=False):
         "Carregamentos",
         "Cards por posto com sugestão de carga para os próximos dias. Toque em um card para ver a semana sugerida.",
     )
-    _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
-    selected_station = selected_station_from_query()
-    if selected_station:
-        render_station_week_plan(selected_station, weekly_schedule)
-        return
-
+    df, _, trend, _, weekly_schedule, _ = purchase_context(read_only)
     days_ahead = st.select_slider(
         "Mostrar carregamentos até",
         options=[1, 2, 3, 4, 5, 6, 7],
@@ -2574,8 +2650,16 @@ def render_tomorrow_loading_page(read_only=False):
         format_func=lambda value: f"{value} dia(s) para frente",
         help="Escolha o horizonte da programação. O padrão mostra os próximos 4 dias a partir de amanhã.",
     )
-    render_daily_loading_summary(daily_loading_summary(weekly_schedule, days_ahead))
-    cards = loading_schedule_by_station(weekly_schedule, days_ahead)
+    projected_schedule = project_loading_schedule(df, trend, days_ahead)
+    if projected_schedule.empty:
+        projected_schedule = weekly_schedule
+    selected_station = selected_station_from_query()
+    if selected_station:
+        render_station_week_plan(selected_station, projected_schedule)
+        return
+
+    render_daily_loading_summary(daily_loading_summary(projected_schedule, days_ahead))
+    cards = loading_schedule_by_station(projected_schedule, days_ahead)
     render_tomorrow_loading_cards(cards, days_ahead)
 
 
