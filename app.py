@@ -73,6 +73,43 @@ PRODUCT_COLORS = {
     "Diesel Aditivado": "#fb7185",
 }
 
+PURCHASE_COLUMN_HELP = {
+    "Posto": "Unidade/posto onde o produto será entregue.",
+    "Produto": "Combustível analisado para compra.",
+    "Estoque Atual": "Volume físico atual informado ou importado para este produto.",
+    "Estoque Atual (L)": "Volume físico atual no tanque, em litros.",
+    "Consumo Diário": "Venda média diária usada para projetar a autonomia.",
+    "VMD (L/dia)": "Venda média diária em litros por dia.",
+    "Cobertura (dias)": "Quantos dias o estoque atual deve durar com o consumo projetado.",
+    "Dias de Autonomia": "Quantidade estimada de dias até o estoque acabar.",
+    "Tendência Consumo": "Direção recente do consumo: alta, queda ou estabilidade.",
+    "Tendência Preço": "Sinal de mercado usado para antecipar ou postergar compra.",
+    "Estratégia de Estoque": "Perfil recomendado entre segurança, normalidade e eficiência de capital.",
+    "Prazo Financeiro (dias)": "Prazo médio de boleto/financeiro do posto para esta compra.",
+    "Score": "Nota de 0 a 100 que combina risco de falta, oportunidade de preço e logística.",
+    "Motivo": "Principal razão da recomendação gerada pelo sistema.",
+    "Janela de Entrega": "Período ideal para receber sem faltar produto e sem exceder o tanque.",
+    "Recomendação": "Orientação operacional final para compra.",
+    "Comprar?": "Indica se o sistema recomenda comprar neste ciclo.",
+    "Quando": "Prazo sugerido para ação de compra ou reavaliação.",
+    "Volume": "Volume recomendado para compra, respeitando múltiplos de 5.000 L.",
+    "Comprar (L)": "Volume sugerido para carregar, em litros.",
+    "Autonomia Atual": "Cobertura atual em dias antes da entrega sugerida.",
+    "Chegada Prevista": "Dia sugerido para chegada/carregamento.",
+    "Data": "Data da chegada/carregamento planejado.",
+    "Prioridade": "Classificação operacional da urgência do pedido.",
+    "Observação": "Justificativa complementar gerada pelo sistema.",
+    "Lote": "Grupo operacional de pedidos conforme as regras da Vibra e do transporte.",
+    "Carregamento": "Dia da semana e data em que a carga deve chegar/carregar.",
+    "Prazo Vibra": "Prazo máximo recomendado para inserir o pedido no site da Vibra.",
+    "Prazo Alterar/Cancelar": "Prazo limite para tentar alterar ou cancelar o pedido.",
+    "Prazo Transporte": "Prazo para comunicar o transportador com garantia operacional.",
+    "Inserido na Vibra": "Marque quando o pedido já foi lançado no sistema da Vibra.",
+    "Enviado ao Transportador": "Marque quando a programação já foi enviada ao transportador.",
+    "Status": "Situação operacional do pedido considerando prazos e confirmações.",
+    "Observacao Operacional": "Resumo automático do risco ou pendência operacional.",
+}
+
 STATION_COLORS = {
     "AP Casa Caiada": {"accent": "#38bdf8", "bg": "rgba(56, 189, 248, .14)", "border": "rgba(56, 189, 248, .50)"},
     "Posto Doze Filial II": {"accent": "#f59e0b", "bg": "rgba(245, 158, 11, .14)", "border": "rgba(245, 158, 11, .50)"},
@@ -908,6 +945,22 @@ def liters(value):
     return f"{float(value):,.0f} L".replace(",", ".")
 
 
+def help_for_column(column):
+    return PURCHASE_COLUMN_HELP.get(column, "")
+
+
+def number_column(column, **kwargs):
+    return st.column_config.NumberColumn(column, help=help_for_column(column), **kwargs)
+
+
+def progress_column(column, **kwargs):
+    return st.column_config.ProgressColumn(column, help=help_for_column(column), **kwargs)
+
+
+def text_column(column):
+    return st.column_config.TextColumn(column, help=help_for_column(column))
+
+
 def station_style(station):
     fallback = {"accent": "#94a3b8", "bg": "rgba(148, 163, 184, .12)", "border": "rgba(148, 163, 184, .38)"}
     return STATION_COLORS.get(station, fallback)
@@ -1568,8 +1621,16 @@ def render_price_simulator(exec_df, weekly_schedule):
                 hide_index=True,
                 use_container_width=True,
                 column_config={
-                    "Volume": st.column_config.NumberColumn(format="%.0f"),
-                    "Resultado Potencial": st.column_config.NumberColumn(format="R$ %.2f"),
+                    "Posto": text_column("Posto"),
+                    "Produto": text_column("Produto"),
+                    "Volume": number_column("Volume", format="%.0f"),
+                    "Tendência Preço": text_column("Tendência Preço"),
+                    "Motivo": text_column("Motivo"),
+                    "Resultado Potencial": st.column_config.NumberColumn(
+                        "Resultado Potencial",
+                        help="Estimativa financeira do ganho ou perda simulada pelo preço informado.",
+                        format="R$ %.2f",
+                    ),
                 },
             )
     return price_delta
@@ -1586,8 +1647,15 @@ def render_financial_control(weekly_schedule, price_delta):
         hide_index=True,
         use_container_width=True,
         column_config={
-            "Volume (L)": st.column_config.NumberColumn(format="%.0f"),
-            "Impacto Caixa Simulado": st.column_config.NumberColumn(format="R$ %.2f"),
+            "Posto": text_column("Posto"),
+            "Produto": text_column("Produto"),
+            "Volume (L)": st.column_config.NumberColumn("Volume (L)", help="Volume programado para compra/recebimento.", format="%.0f"),
+            "Prazo (dias)": st.column_config.NumberColumn("Prazo (dias)", help="Prazo financeiro usado para estimar o vencimento do boleto.", format="%d"),
+            "Impacto Caixa Simulado": st.column_config.NumberColumn(
+                "Impacto Caixa Simulado",
+                help="Impacto estimado no caixa com base na variação de preço simulada.",
+                format="R$ %.2f",
+            ),
         },
     )
 
@@ -2369,9 +2437,13 @@ def render_station_week_plan(station, weekly_schedule):
         use_container_width=True,
         column_config={
             "Posto": None,
-            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-            "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
-            "Score": st.column_config.NumberColumn(format="%.0f"),
+            "Carregamento": st.column_config.TextColumn("Carregamento", help="Dia da semana e data em que a carga deve chegar/carregar."),
+            "Produto": text_column("Produto"),
+            "Comprar (L)": number_column("Comprar (L)", format="%.0f"),
+            "Autonomia Atual": number_column("Autonomia Atual", format="%.1f"),
+            "Score": number_column("Score", format="%.0f"),
+            "Motivo": text_column("Motivo"),
+            "Observação": text_column("Observação"),
         },
     )
 
@@ -2770,10 +2842,16 @@ def render_weekly_programming(weekly_schedule, base_calendar):
         hide_index=True,
         use_container_width=True,
         column_config={
-            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-            "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
-            "Score": st.column_config.NumberColumn(format="%.0f"),
-            "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
+            "Posto": text_column("Posto"),
+            "Produto": text_column("Produto"),
+            "Comprar (L)": number_column("Comprar (L)", format="%.0f"),
+            "Autonomia Atual": number_column("Autonomia Atual", format="%.1f"),
+            "Score": number_column("Score", format="%.0f"),
+            "Prazo Financeiro (dias)": number_column("Prazo Financeiro (dias)", format="%d"),
+            "Prioridade": text_column("Prioridade"),
+            "Motivo": text_column("Motivo"),
+            "Janela de Entrega": text_column("Janela de Entrega"),
+            "Observação": text_column("Observação"),
         },
     )
     return weekly_schedule
@@ -2832,12 +2910,22 @@ def render_main_panel(read_only=False):
             hide_index=True,
             use_container_width=True,
             column_config={
-                "Estoque Atual": st.column_config.NumberColumn(format="%.0f"),
-                "Consumo Diário": st.column_config.NumberColumn(format="%.1f"),
-                "Cobertura (dias)": st.column_config.NumberColumn(format="%.1f"),
-                "Volume": st.column_config.NumberColumn(format="%.0f"),
-                "Score": st.column_config.ProgressColumn(min_value=0, max_value=100, format="%.0f"),
-                "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
+                "Posto": text_column("Posto"),
+                "Produto": text_column("Produto"),
+                "Estoque Atual": number_column("Estoque Atual", format="%.0f"),
+                "Consumo Diário": number_column("Consumo Diário", format="%.1f"),
+                "Cobertura (dias)": number_column("Cobertura (dias)", format="%.1f"),
+                "Tendência Consumo": text_column("Tendência Consumo"),
+                "Tendência Preço": text_column("Tendência Preço"),
+                "Estratégia de Estoque": text_column("Estratégia de Estoque"),
+                "Prazo Financeiro (dias)": number_column("Prazo Financeiro (dias)", format="%d"),
+                "Score": progress_column("Score", min_value=0, max_value=100, format="%.0f"),
+                "Motivo": text_column("Motivo"),
+                "Janela de Entrega": text_column("Janela de Entrega"),
+                "Recomendação": text_column("Recomendação"),
+                "Comprar?": text_column("Comprar?"),
+                "Quando": text_column("Quando"),
+                "Volume": number_column("Volume", format="%.0f"),
             },
         )
 
@@ -2934,7 +3022,18 @@ def render_loading_orders_page(read_only=False):
                     hide_index=True,
                     use_container_width=True,
                     column_config={
-                        "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+                        "Lote": text_column("Lote"),
+                        "Carregamento": text_column("Carregamento"),
+                        "Posto": text_column("Posto"),
+                        "Produto": text_column("Produto"),
+                        "Comprar (L)": number_column("Comprar (L)", format="%.0f"),
+                        "Prazo Vibra": text_column("Prazo Vibra"),
+                        "Prazo Alterar/Cancelar": text_column("Prazo Alterar/Cancelar"),
+                        "Prazo Transporte": text_column("Prazo Transporte"),
+                        "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra", help=help_for_column("Inserido na Vibra")),
+                        "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador", help=help_for_column("Enviado ao Transportador")),
+                        "Status": text_column("Status"),
+                        "Observacao Operacional": text_column("Observacao Operacional"),
                     },
                 )
 
@@ -2973,9 +3072,18 @@ def render_loading_orders_page(read_only=False):
             "Chave",
         ],
         column_config={
-            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-            "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra"),
-            "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador"),
+            "Lote": text_column("Lote"),
+            "Carregamento": text_column("Carregamento"),
+            "Posto": text_column("Posto"),
+            "Produto": text_column("Produto"),
+            "Comprar (L)": number_column("Comprar (L)", format="%.0f"),
+            "Prazo Vibra": text_column("Prazo Vibra"),
+            "Prazo Alterar/Cancelar": text_column("Prazo Alterar/Cancelar"),
+            "Prazo Transporte": text_column("Prazo Transporte"),
+            "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra", help=help_for_column("Inserido na Vibra")),
+            "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador", help=help_for_column("Enviado ao Transportador")),
+            "Status": text_column("Status"),
+            "Observacao Operacional": text_column("Observacao Operacional"),
             "Data": None,
             "Compartimentos": None,
             "Chave": None,
