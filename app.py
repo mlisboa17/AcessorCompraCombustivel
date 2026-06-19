@@ -35,7 +35,7 @@ if load_dotenv is not None:
 
 
 st.set_page_config(
-    page_title="Vibra/Suape | Painel de Compras",
+    page_title="FuelGuard360 | Painel de Compras",
     page_icon="⛽",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -756,7 +756,7 @@ def login_screen():
     left, mid, right = st.columns([1.2, 1, 1.2])
     with mid:
         st.markdown('<div class="top-title">', unsafe_allow_html=True)
-        st.title("⛽ Vibra/Suape")
+        st.title("⛽ FuelGuard360")
         st.markdown(
             '<p class="subtitle">Painel corporativo para decisão de compras, estoque e autonomia da rede.</p>',
             unsafe_allow_html=True,
@@ -1847,7 +1847,7 @@ def allowed_station():
 def render_sidebar():
     user = st.session_state.user
     market = get_market_data()
-    st.sidebar.title("⛽ FuelGuard")
+    st.sidebar.title("⛽ FuelGuard360")
     st.sidebar.caption("Trader inteligente de combustível")
     st.sidebar.divider()
     st.sidebar.markdown(f"**{user['name']}**")
