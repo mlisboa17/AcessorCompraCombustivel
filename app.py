@@ -394,9 +394,11 @@ def normalize_product(value):
     aliases = {
         "GASOLINA": "Gasolina Comum",
         "GASOLINA COMUM": "Gasolina Comum",
+        "GASO COMUM": "Gasolina Comum",
         "GC": "Gasolina Comum",
         "ETANOL": "Etanol Comum",
         "ETANOL COMUM": "Etanol Comum",
+        "ET": "Etanol Comum",
         "ALCOOL": "Etanol Comum",
         "ÁLCOOL": "Etanol Comum",
         "GASOLINA ADITIVADA": "Gasolina Aditivada",
@@ -494,6 +496,7 @@ def init_state():
     st.session_state.setdefault("last_market_update", None)
     st.session_state.setdefault("sales_trends", {})
     st.session_state.setdefault("decision_history", [])
+    st.session_state.setdefault("manual_schedule_items", [])
     migrate_users()
 
 
@@ -889,6 +892,35 @@ def build_weekly_receiving_schedule(exec_df):
         ]
     )
     return schedule, calendar
+
+
+def manual_item_to_schedule_row(item):
+    date_value = datetime.strptime(item["Data"], "%d/%m/%Y").date()
+    return {
+        "Chegada Prevista": f"{short_weekday(item['Data'])} {date_value.strftime('%d/%m')}",
+        "Data": item["Data"],
+        "Posto": item["Empresa"],
+        "Produto": item["Produto"],
+        "Comprar (L)": float(item["Volume (L)"]),
+        "Compartimentos": int(float(item["Volume (L)"]) / TRUCK_COMPARTMENT_LITERS),
+        "Autonomia Atual": 0.0,
+        "Score": 0,
+        "Prazo Financeiro (dias)": int(item.get("Prazo Financeiro (dias)", 0)),
+        "Prioridade": "Manual",
+        "Motivo": "Item manual",
+        "Janela de Entrega": "Incluído manualmente",
+        "Observação": item.get("Observação", ""),
+    }
+
+
+def merge_manual_schedule(schedule):
+    manual_items = st.session_state.get("manual_schedule_items", [])
+    if not manual_items:
+        return schedule
+    manual_df = pd.DataFrame([manual_item_to_schedule_row(item) for item in manual_items])
+    if schedule.empty:
+        return manual_df
+    return pd.concat([schedule, manual_df], ignore_index=True)
 
 
 def build_executive_table(df, trend):
@@ -1358,6 +1390,56 @@ def filter_weekly_schedule(schedule):
     return filtered.drop(columns=["_DataFiltro"], errors="ignore")
 
 
+def render_manual_schedule_manager():
+    with st.expander("Adicionar outras empresas/produtos na programação", expanded=False):
+        st.caption("Use para incluir cargas avulsas de outras empresas ou produtos e conferir junto com a programação da semana.")
+        start = datetime.now().date()
+        max_date = start + timedelta(days=6)
+        with st.form("manual_schedule_form"):
+            c1, c2 = st.columns(2)
+            company = c1.text_input("Empresa/Posto", placeholder="Ex: Cliente Parceiro")
+            product = c2.text_input("Produto", placeholder="Ex: Gasolina Comum")
+            c3, c4, c5 = st.columns(3)
+            delivery_date = c3.date_input("Data de chegada", value=start, min_value=start, max_value=max_date)
+            volume = c4.number_input(
+                "Volume (L)",
+                min_value=TRUCK_COMPARTMENT_LITERS,
+                step=TRUCK_COMPARTMENT_LITERS,
+                value=TRUCK_COMPARTMENT_LITERS,
+            )
+            payment_term = c5.number_input("Prazo financeiro (dias)", min_value=0, max_value=90, value=0, step=1)
+            note = st.text_input("Observação", placeholder="Ex: carga para conferência")
+            submitted = st.form_submit_button("Adicionar à programação", type="primary")
+
+        if submitted:
+            if not company.strip() or not product.strip():
+                st.error("Informe empresa/posto e produto.")
+            else:
+                st.session_state.manual_schedule_items.append(
+                    {
+                        "Empresa": company.strip(),
+                        "Produto": product.strip(),
+                        "Data": delivery_date.strftime("%d/%m/%Y"),
+                        "Volume (L)": float(volume),
+                        "Prazo Financeiro (dias)": int(payment_term),
+                        "Observação": note.strip(),
+                    }
+                )
+                st.success("Item manual adicionado à programação.")
+                st.rerun()
+
+        if st.session_state.manual_schedule_items:
+            manual_df = pd.DataFrame(st.session_state.manual_schedule_items)
+            st.dataframe(manual_df, hide_index=True, use_container_width=True)
+            remove_options = [f"{i} - {item['Empresa']} / {item['Produto']} / {item['Data']}" for i, item in enumerate(st.session_state.manual_schedule_items)]
+            selected_remove = st.selectbox("Remover item manual", remove_options, key="remove_manual_schedule")
+            if st.button("Remover selecionado"):
+                index = int(selected_remove.split(" - ", 1)[0])
+                st.session_state.manual_schedule_items.pop(index)
+                st.success("Item removido.")
+                st.rerun()
+
+
 def short_weekday(date_text):
     try:
         day = datetime.strptime(date_text, "%d/%m/%Y")
@@ -1368,6 +1450,7 @@ def short_weekday(date_text):
 
 
 def product_transport_code(product):
+    normalized = normalize_product(product)
     codes = {
         "Gasolina Comum": "GC",
         "Etanol Comum": "ET",
@@ -1377,7 +1460,7 @@ def product_transport_code(product):
         "Diesel Comum": "DC",
         "Diesel Aditivado": "DA",
     }
-    return codes.get(product, product)
+    return codes.get(normalized, product)
 
 
 def render_transport_order(schedule):
@@ -1702,6 +1785,8 @@ def render_main_panel(read_only=False):
     st.subheader("Saída executiva de compra")
     exec_df = build_executive_table(df, trend)
     weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
+    render_manual_schedule_manager()
+    weekly_schedule = merge_manual_schedule(weekly_schedule)
     price_delta = render_price_simulator(exec_df, weekly_schedule)
     render_mobile_recommendation_cards(exec_df, weekly_schedule)
 
