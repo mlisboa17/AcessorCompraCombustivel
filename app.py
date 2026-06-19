@@ -385,6 +385,194 @@ def supabase_status():
     return "Supabase conectado"
 
 
+def supabase_enabled():
+    return get_supabase_client() is not None
+
+
+def supabase_execute(label, fn, fallback=None):
+    client = get_supabase_client()
+    if client is None:
+        return fallback
+    try:
+        return fn(client)
+    except Exception as exc:
+        st.session_state.setdefault("supabase_errors", [])
+        st.session_state.supabase_errors.append(f"{label}: {exc}")
+        return fallback
+
+
+def load_products_from_supabase():
+    def query(client):
+        rows = client.table("products").select("*").eq("active", True).execute().data or []
+        return {row["name"]: row for row in rows}
+
+    return supabase_execute("load_products", query, {}) or {}
+
+
+def load_network_from_supabase():
+    def query(client):
+        stations = client.table("stations").select("*").eq("active", True).execute().data or []
+        products = load_products_from_supabase()
+        product_by_id = {row["id"]: row["name"] for row in products.values()}
+        tanks = client.table("tanks").select("*").eq("active", True).execute().data or []
+        network = {}
+        for station in stations:
+            network[station["name"]] = {
+                "city": station.get("city") or "Pernambuco",
+                "payment_term_days": int(station.get("payment_term_days") or 0),
+                "tanks": {},
+            }
+        station_by_id = {station["id"]: station["name"] for station in stations}
+        for tank in tanks:
+            station_name = station_by_id.get(tank["station_id"])
+            product_name = product_by_id.get(tank["product_id"])
+            if station_name and product_name:
+                network[station_name]["tanks"][product_name] = {
+                    "capacity": float(tank.get("capacity_liters") or 0),
+                    "stock": float(tank.get("current_stock_liters") or 0),
+                    "vmd": float(tank.get("daily_avg_liters") or 0),
+                }
+        return network
+
+    return supabase_execute("load_network", query, None)
+
+
+def upsert_products(client):
+    rows = [{"name": product, "short_code": product_transport_code(product), "active": True} for product in PRODUCTS]
+    client.table("products").upsert(rows, on_conflict="name").execute()
+    return load_products_from_supabase()
+
+
+def save_network_to_supabase(network):
+    def command(client):
+        products = upsert_products(client)
+        station_rows = [
+            {
+                "name": station,
+                "city": payload.get("city", "Pernambuco"),
+                "payment_term_days": int(payload.get("payment_term_days", 0)),
+                "color_key": station,
+                "active": True,
+            }
+            for station, payload in network.items()
+        ]
+        if station_rows:
+            client.table("stations").upsert(station_rows, on_conflict="name").execute()
+        stations = client.table("stations").select("*").execute().data or []
+        station_ids = {row["name"]: row["id"] for row in stations}
+        tank_rows = []
+        for station, payload in network.items():
+            station_id = station_ids.get(station)
+            if not station_id:
+                continue
+            for product, tank in payload.get("tanks", {}).items():
+                product_id = products.get(product, {}).get("id")
+                if product_id:
+                    tank_rows.append(
+                        {
+                            "station_id": station_id,
+                            "product_id": product_id,
+                            "capacity_liters": float(tank.get("capacity", 0)),
+                            "current_stock_liters": float(tank.get("stock", 0)),
+                            "daily_avg_liters": float(tank.get("vmd", 0)),
+                            "active": True,
+                        }
+                    )
+        if tank_rows:
+            client.table("tanks").upsert(tank_rows, on_conflict="station_id,product_id").execute()
+        return True
+
+    return supabase_execute("save_network", command, False)
+
+
+def load_users_from_supabase():
+    def query(client):
+        users = client.table("app_users").select("*").execute().data or []
+        stations = client.table("stations").select("id,name").execute().data or []
+        station_by_id = {row["id"]: row["name"] for row in stations}
+        links = client.table("user_stations").select("*").execute().data or []
+        station_links = {}
+        for link in links:
+            station_links.setdefault(link["user_id"], []).append(station_by_id.get(link["station_id"]))
+        output = {}
+        for user in users:
+            output[user["username"]] = {
+                "name": user["name"],
+                "role": user["role"],
+                "password_hash": user["password_hash"],
+                "active": bool(user.get("active", True)),
+                "stations": [station for station in station_links.get(user["id"], []) if station],
+            }
+        return output
+
+    return supabase_execute("load_users", query, None)
+
+
+def save_users_to_supabase(users):
+    def command(client):
+        rows = [
+            {
+                "username": username,
+                "name": payload.get("name", username),
+                "role": payload.get("role", "Gerente"),
+                "password_hash": payload.get("password_hash", ""),
+                "active": bool(payload.get("active", True)),
+            }
+            for username, payload in users.items()
+        ]
+        if rows:
+            client.table("app_users").upsert(rows, on_conflict="username").execute()
+        db_users = client.table("app_users").select("id,username").execute().data or []
+        db_stations = client.table("stations").select("id,name").execute().data or []
+        user_ids = {row["username"]: row["id"] for row in db_users}
+        station_ids = {row["name"]: row["id"] for row in db_stations}
+        for username, payload in users.items():
+            user_id = user_ids.get(username)
+            if not user_id:
+                continue
+            client.table("user_stations").delete().eq("user_id", user_id).execute()
+            if payload.get("role") == "Gerente":
+                links = [
+                    {"user_id": user_id, "station_id": station_ids[station]}
+                    for station in payload.get("stations", [])
+                    if station in station_ids
+                ]
+                if links:
+                    client.table("user_stations").insert(links).execute()
+        return True
+
+    return supabase_execute("save_users", command, False)
+
+
+def save_decision_to_supabase(decision):
+    def command(client):
+        client.table("decision_history").insert(
+            {
+                "username": decision.get("Usuário", ""),
+                "decision": decision.get("Decisão", ""),
+                "total_volume_liters": float(decision.get("Volume Total (L)", 0)),
+                "scheduled_orders": int(decision.get("Pedidos Programados", 0)),
+                "simulated_result": float(decision.get("Resultado Simulado", 0)),
+                "notes": decision.get("Observação", ""),
+            }
+        ).execute()
+        return True
+
+    return supabase_execute("save_decision", command, False)
+
+
+def seed_supabase_if_empty():
+    if not supabase_enabled() or st.session_state.get("supabase_seed_checked"):
+        return
+    network = load_network_from_supabase()
+    if not network:
+        save_network_to_supabase(default_network())
+    users = load_users_from_supabase()
+    if not users:
+        save_users_to_supabase(default_users())
+    st.session_state.supabase_seed_checked = True
+
+
 def migrate_users():
     migrated = {}
     for username, payload in st.session_state.users.items():
@@ -542,7 +730,16 @@ def init_state():
     st.session_state.setdefault("authenticated", False)
     st.session_state.setdefault("user", None)
     st.session_state.setdefault("users", default_users())
-    if st.session_state.get("data_version") != DATA_VERSION:
+    if supabase_enabled():
+        seed_supabase_if_empty()
+        db_network = load_network_from_supabase()
+        if db_network:
+            st.session_state.network = db_network
+            st.session_state.data_version = DATA_VERSION
+        db_users = load_users_from_supabase()
+        if db_users:
+            st.session_state.users = db_users
+    elif st.session_state.get("data_version") != DATA_VERSION:
         st.session_state.network = default_network()
         st.session_state.data_version = DATA_VERSION
     st.session_state.setdefault("network", default_network())
@@ -1105,6 +1302,7 @@ def render_decision_history(exec_df, weekly_schedule, price_delta):
             }
         )
         st.success("Decisão registrada no histórico.")
+        save_decision_to_supabase(st.session_state.decision_history[-1])
 
     if st.session_state.decision_history:
         history_df = pd.DataFrame(st.session_state.decision_history)
@@ -1823,6 +2021,7 @@ def render_main_panel(read_only=False):
                     max(float(row["Estoque Atual (L)"]), 0), capacity
                 )
             st.success("Medições atualizadas.")
+            save_network_to_supabase(st.session_state.network)
             st.rerun()
 
     st.subheader("Mercado online")
@@ -2022,6 +2221,7 @@ def render_network_admin():
                     st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
                     if st.button("Importar cadastro para a rede", type="primary"):
                         merge_imported_stations(imported)
+                        save_network_to_supabase(st.session_state.network)
                         st.success("Cadastro importado.")
                         st.rerun()
             except Exception as exc:
@@ -2067,6 +2267,7 @@ def render_network_admin():
             }
 
         st.session_state.network = new_network
+        save_network_to_supabase(st.session_state.network)
         st.success("Rede atualizada.")
         st.rerun()
 
@@ -2220,6 +2421,7 @@ def render_user_crud():
                     "stations": [] if role == "Sócio" else stations,
                     "active": active,
                 }
+                save_users_to_supabase(st.session_state.users)
                 st.success("Usuário criado.")
                 st.rerun()
 
@@ -2267,6 +2469,7 @@ def render_user_crud():
                     )
                     if selected == st.session_state.user.get("username"):
                         st.session_state.user = current_user_payload(selected)
+                    save_users_to_supabase(st.session_state.users)
                     st.success("Usuário atualizado.")
                     st.rerun()
 
@@ -2283,6 +2486,7 @@ def render_user_crud():
                     st.error("As senhas não conferem.")
                 else:
                     st.session_state.users[selected]["password_hash"] = hash_password(new_password)
+                    save_users_to_supabase(st.session_state.users)
                     st.success("Senha atualizada.")
 
         with c2:
@@ -2293,6 +2497,7 @@ def render_user_crud():
                     st.error("Confirmação inválida.")
                 else:
                     del st.session_state.users[selected]
+                    save_users_to_supabase(st.session_state.users)
                     st.success("Usuário excluído.")
                     st.rerun()
 
@@ -2328,6 +2533,7 @@ def render_settings_sales():
             raw = read_sales_file(uploaded)
             normalized = normalize_sales_columns(raw)
             updated, ignored, grouped = apply_sales_upload(normalized, last_30_days=last_30_days)
+            save_network_to_supabase(st.session_state.network)
             st.success(f"VMD recalculada para {updated} combinação(ões) de posto/produto.")
             if ignored:
                 st.warning("Linhas ignoradas por posto/produto não cadastrado: " + "; ".join(ignored[:8]))
@@ -2362,6 +2568,7 @@ def render_settings_sales():
                 st.dataframe(pd.DataFrame(stock_rows), hide_index=True, use_container_width=True)
                 if st.button("Atualizar estoque atual", type="primary"):
                     updated, ignored = apply_stock_import(stocks)
+                    save_network_to_supabase(st.session_state.network)
                     st.success(f"Estoque atualizado para {updated} produto(s).")
                     if ignored:
                         st.warning("Itens ignorados: " + "; ".join(ignored[:12]))
