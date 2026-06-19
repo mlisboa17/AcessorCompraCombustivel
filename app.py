@@ -355,8 +355,17 @@ def get_config_value(key):
     return os.getenv(key)
 
 
+def normalize_supabase_url(url):
+    if not url:
+        return url
+    clean_url = str(url).strip().rstrip("/")
+    if clean_url.endswith("/rest/v1"):
+        clean_url = clean_url[: -len("/rest/v1")]
+    return clean_url
+
+
 def get_supabase_client():
-    url = get_config_value("SUPABASE_URL")
+    url = normalize_supabase_url(get_config_value("SUPABASE_URL"))
     key = get_config_value("SUPABASE_ANON_KEY")
     if not url or not key or create_client is None:
         return None
@@ -369,7 +378,7 @@ def get_supabase_client():
 def supabase_status():
     if create_client is None:
         return "Biblioteca Supabase não instalada"
-    if not get_config_value("SUPABASE_URL") or not get_config_value("SUPABASE_ANON_KEY"):
+    if not normalize_supabase_url(get_config_value("SUPABASE_URL")) or not get_config_value("SUPABASE_ANON_KEY"):
         return "Modo memória: chaves Supabase não configuradas"
     if get_supabase_client() is None:
         return "Supabase configurado, mas conexão falhou"
