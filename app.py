@@ -2484,7 +2484,7 @@ def render_loading_orders_page(read_only=False):
     )
 
     filter_cols = st.columns(3)
-    lote_options = ["Todos"] + sorted(visible_df["Lote"].dropna().unique().tolist())
+    lote_options = ["Todos", "Lote Inicio de Semana", "Lote Final de Semana"]
     status_options = ["Todos"] + sorted(visible_df["Status"].dropna().unique().tolist())
     selected_lote = filter_cols[0].selectbox("Lote", lote_options)
     selected_status = filter_cols[1].selectbox("Status", status_options)
@@ -2494,6 +2494,29 @@ def render_loading_orders_page(read_only=False):
     source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
     end_date = now_local().date() + timedelta(days=selected_days - 1)
     source = source[source["_DataFiltro"].dt.date <= end_date]
+    dated_source = source.copy()
+
+    st.markdown("#### Visao por lote")
+    tab_inicio, tab_final = st.tabs(["Lote Inicio de Semana", "Lote Final de Semana"])
+    for tab, lote_name in [
+        (tab_inicio, "Lote Inicio de Semana"),
+        (tab_final, "Lote Final de Semana"),
+    ]:
+        with tab:
+            lote_df = dated_source[dated_source["Lote"] == lote_name].drop(columns=["_DataFiltro", "Chave"], errors="ignore")
+            if lote_df.empty:
+                st.info("Nenhum pedido neste lote dentro do periodo selecionado.")
+            else:
+                st.dataframe(
+                    lote_df.style.apply(style_loading_orders, axis=1),
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+                        "Compartimentos": st.column_config.NumberColumn(format="%d"),
+                    },
+                )
+
     if selected_lote != "Todos":
         source = source[source["Lote"] == selected_lote]
     if selected_status != "Todos":
