@@ -27,6 +27,8 @@ create table if not exists public.tanks (
     station_id uuid not null references public.stations(id) on delete cascade,
     product_id uuid not null references public.products(id) on delete restrict,
     capacity_liters numeric(12,2) not null default 0,
+    capacity_per_tank_liters numeric(12,2) not null default 0,
+    tank_count integer not null default 1,
     current_stock_liters numeric(12,2) not null default 0,
     daily_avg_liters numeric(12,2) not null default 0,
     active boolean not null default true,

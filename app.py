@@ -5,6 +5,7 @@ import math
 import os
 import re
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import plotly.graph_objects as go
@@ -47,6 +48,7 @@ TRUCK_CAPACITY_LITERS = 25000
 AVAILABLE_TRUCKS_PER_DAY = 2
 DAILY_DELIVERY_CAPACITY_LITERS = TRUCK_CAPACITY_LITERS * AVAILABLE_TRUCKS_PER_DAY
 MARKET_REFRESH_HOURS = 3
+APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias-prazo-logistica"
 PRODUCTS = [
     "Gasolina Comum",
@@ -402,6 +404,10 @@ def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+def now_local():
+    return datetime.now(APP_TIMEZONE)
+
+
 def default_users():
     return {username: payload.copy() for username, payload in USERS.items()}
 
@@ -488,8 +494,15 @@ def load_network_from_supabase():
             station_name = station_by_id.get(tank["station_id"])
             product_name = product_by_id.get(tank["product_id"])
             if station_name and product_name:
+                capacity = float(tank.get("capacity_liters") or 0)
+                tank_count = int(tank.get("tank_count") or 1)
+                capacity_per_tank = float(tank.get("capacity_per_tank_liters") or 0) or (
+                    capacity / tank_count if tank_count > 0 else capacity
+                )
                 network[station_name]["tanks"][product_name] = {
-                    "capacity": float(tank.get("capacity_liters") or 0),
+                    "capacity": capacity,
+                    "tank_count": tank_count,
+                    "capacity_per_tank": capacity_per_tank,
                     "stock": float(tank.get("current_stock_liters") or 0),
                     "vmd": float(tank.get("daily_avg_liters") or 0),
                 }
@@ -529,12 +542,20 @@ def save_network_to_supabase(network):
             for product, tank in payload.get("tanks", {}).items():
                 product_id = products.get(product, {}).get("id")
                 if product_id:
+                    tank_count = max(int(tank.get("tank_count", 1) or 1), 1)
+                    capacity_per_tank = float(tank.get("capacity_per_tank", 0) or 0)
+                    capacity = float(tank.get("capacity", 0) or 0)
+                    if capacity_per_tank <= 0:
+                        capacity_per_tank = capacity / tank_count if tank_count else capacity
+                    total_capacity = capacity_per_tank * tank_count
                     tank_rows.append(
                         {
                             "station_id": station_id,
                             "product_id": product_id,
-                            "capacity_liters": float(tank.get("capacity", 0)),
-                            "current_stock_liters": float(tank.get("stock", 0)),
+                            "capacity_liters": total_capacity,
+                            "capacity_per_tank_liters": capacity_per_tank,
+                            "tank_count": tank_count,
+                            "current_stock_liters": min(float(tank.get("stock", 0)), total_capacity),
                             "daily_avg_liters": float(tank.get("vmd", 0)),
                             "active": True,
                         }
@@ -771,7 +792,7 @@ def default_network():
                 "Diesel Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 374.59},
                 "Gasolina Aditivada": {"capacity": 15000.0, "stock": 0.0, "vmd": 385.87},
                 "Etanol Aditivado": {"capacity": 15000.0, "stock": 0.0, "vmd": 2068.20},
-                "Gasolina Comum": {"capacity": 15000.0, "stock": 0.0, "vmd": 3889.52},
+                "Gasolina Comum": {"capacity": 30000.0, "capacity_per_tank": 15000.0, "tank_count": 2, "stock": 0.0, "vmd": 3889.52},
             },
         },
         "Posto VIP": {
@@ -847,6 +868,11 @@ def network_records(station_filter=None):
             continue
         for product, tank in payload["tanks"].items():
             capacity = max(float(tank.get("capacity", 0)), 0)
+            tank_count = max(int(tank.get("tank_count", 1) or 1), 1)
+            capacity_per_tank = max(float(tank.get("capacity_per_tank", 0) or 0), 0)
+            if capacity_per_tank <= 0:
+                capacity_per_tank = capacity / tank_count if tank_count else capacity
+            capacity = max(capacity, capacity_per_tank * tank_count)
             stock = max(float(tank.get("stock", 0)), 0)
             vmd = max(float(tank.get("vmd", 0)), 0)
             autonomy = stock / vmd if vmd > 0 else 0
@@ -857,6 +883,8 @@ def network_records(station_filter=None):
                     "Cidade": payload.get("city", ""),
                     "Prazo Financeiro (dias)": int(payload.get("payment_term_days", 0)),
                     "Produto": product,
+                    "Qtd. Tanques": tank_count,
+                    "Capacidade por Tanque (L)": capacity_per_tank,
                     "Capacidade (L)": capacity,
                     "Estoque Atual (L)": stock,
                     "VMD (L/dia)": vmd,
@@ -919,12 +947,12 @@ def get_market_data(force=False):
     last_update = st.session_state.get("last_market_update_dt")
     expired = True
     if last_update:
-        expired = datetime.now() - last_update >= timedelta(hours=MARKET_REFRESH_HOURS)
+        expired = now_local() - last_update >= timedelta(hours=MARKET_REFRESH_HOURS)
 
     if force or expired or st.session_state.market_cache is None:
         st.session_state.market_cache = fetch_market_data()
-        st.session_state.last_market_update_dt = datetime.now()
-        st.session_state.last_market_update = datetime.now().strftime("%d/%m/%Y %H:%M")
+        st.session_state.last_market_update_dt = now_local()
+        st.session_state.last_market_update = now_local().strftime("%d/%m/%Y %H:%M")
     return st.session_state.market_cache
 
 
@@ -1117,7 +1145,7 @@ def weekly_priority(autonomy, volume):
 
 
 def next_receiving_days(days=7):
-    start = datetime.now().date() + timedelta(days=1)
+    start = now_local().date() + timedelta(days=1)
     labels = []
     for offset in range(days):
         day = start + timedelta(days=offset)
@@ -1346,14 +1374,14 @@ def render_decision_history(exec_df, weekly_schedule, price_delta):
     st.markdown("#### Histórico de decisões")
     c1, c2 = st.columns([1, 3])
     decision = c1.selectbox("Decisão tomada", ["Aprovar recomendação", "Aguardar", "Comprar parcial", "Revisar manualmente"])
-    notes = c2.text_input("Observação", placeholder="Ex: aguardando tabela Vibra/Suape")
+    notes = c2.text_input("Observação", placeholder="Ex: aguardando tabela FuelGuard360")
     if st.button("Registrar decisão da rodada", type="primary"):
         approved = exec_df[exec_df["Comprar?"] == "Sim"].copy()
         total_volume = float(approved["Volume"].sum()) if not approved.empty else 0
         potential_result = total_volume * price_delta
         st.session_state.decision_history.append(
             {
-                "Data/Hora": datetime.now().strftime("%d/%m/%Y %H:%M"),
+                "Data/Hora": now_local().strftime("%d/%m/%Y %H:%M"),
                 "Usuário": st.session_state.user.get("username", ""),
                 "Decisão": decision,
                 "Volume Total (L)": total_volume,
@@ -1477,6 +1505,8 @@ def parse_station_import_text(text):
             if product in PRODUCTS:
                 stations[current_station]["tanks"][product] = {
                     "capacity": capacity,
+                    "capacity_per_tank": capacity,
+                    "tank_count": 1,
                     "stock": 0.0,
                     "vmd": vmd,
                 }
@@ -1498,8 +1528,15 @@ def merge_imported_stations(imported):
         )
         for product, tank in payload["tanks"].items():
             existing = st.session_state.network[station]["tanks"].get(product, {})
+            tank_count = max(int(tank.get("tank_count", existing.get("tank_count", 1)) or 1), 1)
+            capacity_per_tank = float(tank.get("capacity_per_tank", existing.get("capacity_per_tank", 0)) or 0)
+            capacity = float(tank["capacity"])
+            if capacity_per_tank <= 0:
+                capacity_per_tank = capacity / tank_count if tank_count else capacity
             st.session_state.network[station]["tanks"][product] = {
-                "capacity": float(tank["capacity"]),
+                "capacity": capacity_per_tank * tank_count,
+                "capacity_per_tank": capacity_per_tank,
+                "tank_count": tank_count,
                 "stock": float(existing.get("stock", 0)),
                 "vmd": float(tank["vmd"]),
             }
@@ -1664,7 +1701,7 @@ def filter_weekly_schedule(schedule):
 
     filtered = schedule.copy()
     filtered["_DataFiltro"] = pd.to_datetime(filtered["Data"], format="%d/%m/%Y", errors="coerce")
-    start = datetime.now().date() + timedelta(days=1)
+    start = now_local().date() + timedelta(days=1)
     end = start + timedelta(days=2)
     filtered = filtered[
         filtered["_DataFiltro"].dt.date.between(start, end)
@@ -1706,7 +1743,7 @@ def filter_weekly_schedule(schedule):
 def render_manual_schedule_manager():
     with st.expander("Adicionar outras empresas/produtos na programação", expanded=False):
         st.caption("Use para incluir cargas avulsas de outras empresas ou produtos e conferir junto com a programação da semana.")
-        start = datetime.now().date()
+        start = now_local().date()
         max_date = start + timedelta(days=6)
         with st.form("manual_schedule_form"):
             c1, c2 = st.columns(2)
@@ -1788,7 +1825,7 @@ def render_transport_order(schedule):
     selected_station = c1.selectbox("Posto para transporte", station_options, key="transport_station")
     days_ahead = c2.slider("Dias para enviar", min_value=1, max_value=7, value=3, step=1, key="transport_days")
 
-    start = datetime.now().date()
+    start = now_local().date()
     end = start + timedelta(days=days_ahead - 1)
     source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
     view = source[
@@ -1901,7 +1938,7 @@ def render_station_color_legend(df):
 def render_priority_overview(exec_df, weekly_schedule):
     buy_df = exec_df[exec_df["Comprar?"] == "Sim"].copy() if not exec_df.empty else pd.DataFrame()
     today_count = len(buy_df)
-    start = datetime.now().date()
+    start = now_local().date()
     end = start + timedelta(days=2)
     next_3_volume = 0
     if not weekly_schedule.empty:
@@ -1959,7 +1996,12 @@ def render_sidebar():
 
     if user["role"] == "Sócio":
         page_labels = {
-            "📊 Painel de Compras": "Painel de Compras",
+            "📊 Visão Geral": "Painel de Compras",
+            "🧾 Medição de Estoque": "Medição de Estoque",
+            "📅 Programação Semanal": "Programação Semanal",
+            "🚚 Ordem de Transporte": "Ordem de Transporte",
+            "🌎 Mercado e Preço": "Mercado e Preço",
+            "💳 Financeiro": "Financeiro",
             "🏪 Postos e Tanques": "Cadastro de Postos e Tanques",
             "⚙️ Configurações": "Configurações e Vendas",
         }
@@ -2062,7 +2104,7 @@ def render_market_radar(market):
             "Uso na decisão": "Probabilidade de repasse",
         },
         {
-            "Fonte": "Vibra/Suape",
+            "Fonte": "FuelGuard360",
             "Status": "Manual / fornecedor",
             "Sinal": "Conferir tabela",
             "Valor/Delta": "Preço de faturamento",
@@ -2079,19 +2121,86 @@ def render_market_radar(market):
     st.dataframe(pd.DataFrame(radar_rows), hide_index=True, use_container_width=True)
 
 
-def render_main_panel(read_only=False):
+def purchase_context(read_only=False):
     station_filter = allowed_station() if read_only else None
-    title = "📊 Painel de Consulta" if read_only else "📊 Painel de Compras Inteligente"
-    subtitle = (
-        "Visão operacional do posto, autonomia e risco de ruptura."
-        if read_only
-        else "Visão de sócio para decisão rápida de compra, preço e cobertura da rede."
-    )
-    header(title, subtitle)
-
     df = network_records(station_filter)
     market = get_market_data()
     trend = market["trend"]
+    exec_df = build_executive_table(df, trend)
+    weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
+    weekly_schedule = merge_manual_schedule(weekly_schedule)
+    return df, market, trend, exec_df, weekly_schedule, base_calendar
+
+
+def render_stock_measurement(df, read_only=False):
+    st.subheader("Medição física do dia")
+    if read_only:
+        st.caption("Perfil de consulta. Medições e compras são editadas pelo sócio.")
+    edit_df = df[["Posto", "Produto", "Estoque Atual (L)", "Qtd. Tanques", "Capacidade (L)", "VMD (L/dia)"]].copy()
+    edited = st.data_editor(
+        edit_df,
+        hide_index=True,
+        use_container_width=True,
+        disabled=read_only,
+        column_config={
+            "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
+            "Qtd. Tanques": st.column_config.NumberColumn(disabled=True, format="%d"),
+            "Capacidade (L)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+            "VMD (L/dia)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+        },
+    )
+    if not read_only and st.button("Salvar medições", type="primary"):
+        for _, row in edited.iterrows():
+            station = row["Posto"]
+            product = row["Produto"]
+            capacity = st.session_state.network[station]["tanks"][product]["capacity"]
+            st.session_state.network[station]["tanks"][product]["stock"] = min(
+                max(float(row["Estoque Atual (L)"]), 0), capacity
+            )
+        st.success("Medições atualizadas.")
+        save_network_to_supabase(st.session_state.network)
+        st.rerun()
+
+
+def render_weekly_programming(weekly_schedule, base_calendar):
+    st.subheader("Programação semanal de recebimento")
+    render_manual_schedule_manager()
+    weekly_schedule = merge_manual_schedule(weekly_schedule)
+    st.caption(
+        f"Janela móvel de 7 dias a partir de amanhã. Domingo não opera. "
+        f"Capacidade planejada: {AVAILABLE_TRUCKS_PER_DAY} caminhões de {liters(TRUCK_CAPACITY_LITERS)} por dia."
+    )
+    with st.expander("Calendário e capacidade da base", expanded=False):
+        st.dataframe(base_calendar, hide_index=True, use_container_width=True)
+    if weekly_schedule.empty:
+        st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
+        return weekly_schedule
+    st.caption("Mostrando por padrão os próximos 3 dias, com filtros por posto, produto e quantidade.")
+    weekly_schedule_view = filter_weekly_schedule(weekly_schedule)
+    st.dataframe(
+        weekly_schedule_view.style.apply(style_rows_by_station, axis=1),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
+            "Score": st.column_config.NumberColumn(format="%.0f"),
+            "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
+        },
+    )
+    return weekly_schedule
+
+
+def render_main_panel(read_only=False):
+    title = "📊 Painel de Consulta" if read_only else "📊 Visão Geral FuelGuard360"
+    subtitle = (
+        "Visão operacional do posto, autonomia e risco de ruptura."
+        if read_only
+        else "Resumo executivo com foco no que exige decisão agora."
+    )
+    header(title, subtitle)
+
+    df, market, trend, exec_df, weekly_schedule, base_calendar = purchase_context(read_only)
 
     total_stock = df["Estoque Atual (L)"].sum() if not df.empty else 0
     avg_autonomy = df["Dias de Autonomia"].mean() if not df.empty else 0
@@ -2104,43 +2213,10 @@ def render_main_panel(read_only=False):
     c4.metric("🌎 Tendência Macro", trend)
     render_station_color_legend(df)
 
-    exec_df = build_executive_table(df, trend)
-    weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
-    render_manual_schedule_manager()
-    weekly_schedule = merge_manual_schedule(weekly_schedule)
     render_priority_overview(exec_df, weekly_schedule)
     render_mobile_recommendation_cards(exec_df, weekly_schedule)
 
-    with st.expander("Medição física do dia", expanded=False):
-        if read_only:
-            st.caption("Perfil de consulta. Medições e compras são editadas pelo sócio.")
-        edit_df = df[["Posto", "Produto", "Estoque Atual (L)", "Capacidade (L)", "VMD (L/dia)"]].copy()
-        edited = st.data_editor(
-            edit_df,
-            hide_index=True,
-            use_container_width=True,
-            disabled=read_only,
-            column_config={
-                "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
-                "Capacidade (L)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-                "VMD (L/dia)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-            },
-        )
-        if not read_only and st.button("Salvar medições", type="primary"):
-            for _, row in edited.iterrows():
-                station = row["Posto"]
-                product = row["Produto"]
-                capacity = st.session_state.network[station]["tanks"][product]["capacity"]
-                st.session_state.network[station]["tanks"][product]["stock"] = min(
-                    max(float(row["Estoque Atual (L)"]), 0), capacity
-                )
-            st.success("Medições atualizadas.")
-            save_network_to_supabase(st.session_state.network)
-            st.rerun()
-
     st.subheader("Saída executiva de compra")
-    price_delta = render_price_simulator(exec_df, weekly_schedule)
-
     week_df = exec_df[
         (exec_df["Comprar?"] == "Sim")
         & (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)
@@ -2157,61 +2233,6 @@ def render_main_panel(read_only=False):
                 """.replace(",", "."),
                 unsafe_allow_html=True,
             )
-
-    st.markdown("#### Programação semanal de recebimento")
-    st.caption(
-        f"Janela móvel de 7 dias a partir de amanhã. Domingo não opera. "
-        f"Capacidade planejada: {AVAILABLE_TRUCKS_PER_DAY} caminhões de {liters(TRUCK_CAPACITY_LITERS)} por dia."
-    )
-    st.caption("Use esta tabela para decidir o que carregar; use a ordem de transporte para repassar a rota/carga.")
-    with st.expander("Calendário e capacidade da base", expanded=False):
-        st.dataframe(
-            base_calendar,
-            hide_index=True,
-            use_container_width=True,
-        )
-    if weekly_schedule.empty:
-        st.info("Nenhuma compra programada na semana com volume mínimo de 5.000 L.", icon="✅")
-    else:
-        st.caption("Mostrando por padrão os próximos 3 dias, com filtros por posto, produto e quantidade.")
-        weekly_schedule_view = filter_weekly_schedule(weekly_schedule)
-        st.dataframe(
-            weekly_schedule_view.style.apply(style_rows_by_station, axis=1),
-            hide_index=True,
-            use_container_width=True,
-            column_config={
-                "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
-                "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
-                "Score": st.column_config.NumberColumn(format="%.0f"),
-                "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
-            },
-        )
-        render_transport_order(weekly_schedule)
-
-    st.subheader("Mercado e contexto")
-    render_market_signal(market)
-    with st.expander("Indicadores de mercado", expanded=not st.session_state.get("compact_mode", True)):
-        m1, m2, m3, m4 = st.columns([1, 1, 1, 1.1])
-        m1.metric("💵 Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
-        m2.metric("🛢️ Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
-        m3.metric("Sinal", trend)
-        if m4.button("Atualizar mercado", use_container_width=True, help="Atualiza Brent e dólar agora. O app também atualiza automaticamente a cada 3 horas."):
-            with st.spinner("Atualizando mercado..."):
-                get_market_data(force=True)
-            st.rerun()
-        st.caption(
-            f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'} | "
-            f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
-        )
-        st.caption(market.get("source_detail", ""))
-    with st.expander("Radar de mercado", expanded=False):
-        render_market_radar(market)
-
-    with st.expander("Ocupação física dos tanques", expanded=False):
-        for station in df["Posto"].drop_duplicates().tolist():
-            station_df = df[df["Posto"] == station].reset_index(drop=True)
-            st.markdown(station_badge_html(station), unsafe_allow_html=True)
-            st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
 
     if week_df.empty:
         st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
@@ -2231,9 +2252,60 @@ def render_main_panel(read_only=False):
                 "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
             },
         )
-    with st.expander("Financeiro e histórico", expanded=not st.session_state.get("compact_mode", True)):
-        render_financial_control(weekly_schedule, price_delta)
-        render_decision_history(exec_df, weekly_schedule, price_delta)
+
+
+def render_measurement_page(read_only=False):
+    header("🧾 Medição de Estoque", "Atualize a litragem atual por posto e produto.")
+    df, _, _, _, _, _ = purchase_context(read_only)
+    render_stock_measurement(df, read_only)
+
+
+def render_programming_page(read_only=False):
+    header("📅 Programação Semanal", "Compra planejada por data de chegada, respeitando domingo fechado e múltiplos de 5.000 L.")
+    _, _, _, _, weekly_schedule, base_calendar = purchase_context(read_only)
+    render_weekly_programming(weekly_schedule, base_calendar)
+
+
+def render_transport_page(read_only=False):
+    header("🚚 Ordem de Transporte", "Tabela objetiva para repassar ao transportador por posto, data, produto e volume.")
+    _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
+    if weekly_schedule.empty:
+        st.info("Nenhuma carga programada para transporte.", icon="✅")
+    else:
+        render_transport_order(weekly_schedule)
+
+
+def render_market_page(read_only=False):
+    header("🌎 Mercado e Preço", "Radar de Brent, dólar e fontes comerciais para decidir antecipar ou esperar.")
+    df, market, trend, _, _, _ = purchase_context(read_only)
+    render_market_signal(market)
+    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.1])
+    m1.metric("💵 Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
+    m2.metric("🛢️ Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
+    m3.metric("Sinal", trend)
+    if m4.button("Atualizar mercado", use_container_width=True, help="Atualiza Brent e dólar agora. O app também atualiza automaticamente a cada 3 horas."):
+        with st.spinner("Atualizando mercado..."):
+            get_market_data(force=True)
+        st.rerun()
+    st.caption(
+        f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'} | "
+        f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
+    )
+    st.caption(market.get("source_detail", ""))
+    render_market_radar(market)
+    with st.expander("Ocupação física dos tanques", expanded=False):
+        for station in df["Posto"].drop_duplicates().tolist():
+            station_df = df[df["Posto"] == station].reset_index(drop=True)
+            st.markdown(station_badge_html(station), unsafe_allow_html=True)
+            st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
+
+
+def render_finance_page(read_only=False):
+    header("💳 Financeiro", "Simule ganho de preço, prazo de boleto e histórico de decisões.")
+    _, _, _, exec_df, weekly_schedule, _ = purchase_context(read_only)
+    price_delta = render_price_simulator(exec_df, weekly_schedule)
+    render_financial_control(weekly_schedule, price_delta)
+    render_decision_history(exec_df, weekly_schedule, price_delta)
 
 
 def render_network_admin():
@@ -2259,12 +2331,16 @@ def render_network_admin():
                 default=["Gasolina Comum", "Etanol Comum"],
             )
             cols = st.columns(2)
-            capacities = {}
+            tank_counts = {}
+            capacities_per_tank = {}
             vmds = {}
             for i, product in enumerate(selected_products):
                 with cols[i % 2]:
-                    capacities[product] = st.number_input(
-                        f"Capacidade {product} (L)", min_value=0.0, value=30000.0, step=1000.0
+                    tank_counts[product] = st.number_input(
+                        f"Qtd. de tanques - {product}", min_value=1, max_value=10, value=1, step=1
+                    )
+                    capacities_per_tank[product] = st.number_input(
+                        f"Capacidade por tanque - {product} (L)", min_value=0.0, value=15000.0, step=1000.0
                     )
                     vmds[product] = st.number_input(
                         f"VMD {product} (L/dia)", min_value=0.0, value=2500.0, step=100.0
@@ -2285,7 +2361,9 @@ def render_network_admin():
                     "payment_term_days": int(payment_term_days),
                     "tanks": {
                         product: {
-                            "capacity": float(capacities[product]),
+                            "capacity": float(capacities_per_tank[product]) * int(tank_counts[product]),
+                            "capacity_per_tank": float(capacities_per_tank[product]),
+                            "tank_count": int(tank_counts[product]),
                             "stock": 0.0,
                             "vmd": float(vmds[product]),
                         }
@@ -2327,6 +2405,8 @@ def render_network_admin():
                                     "Posto": station,
                                     "Cidade": payload["city"],
                                     "Produto": product,
+                                    "Qtd. Tanques": tank.get("tank_count", 1),
+                                    "Capacidade por Tanque (L)": tank.get("capacity_per_tank", tank["capacity"]),
                                     "Capacidade (L)": tank["capacity"],
                                     "VMD (L/dia)": tank["vmd"],
                                 }
@@ -2343,12 +2423,24 @@ def render_network_admin():
     st.subheader("Editar capacidades, estoque e VMD")
     df = network_records()
     edited = st.data_editor(
-        df[["Posto", "Cidade", "Prazo Financeiro (dias)", "Produto", "Capacidade (L)", "Estoque Atual (L)", "VMD (L/dia)"]],
+        df[[
+            "Posto",
+            "Cidade",
+            "Prazo Financeiro (dias)",
+            "Produto",
+            "Qtd. Tanques",
+            "Capacidade por Tanque (L)",
+            "Capacidade (L)",
+            "Estoque Atual (L)",
+            "VMD (L/dia)",
+        ]],
         hide_index=True,
         use_container_width=True,
         column_config={
             "Prazo Financeiro (dias)": st.column_config.NumberColumn(min_value=0, max_value=90, step=1, format="%d"),
-            "Capacidade (L)": st.column_config.NumberColumn(min_value=0, step=1000, format="%.0f"),
+            "Qtd. Tanques": st.column_config.NumberColumn(min_value=1, max_value=10, step=1, format="%d"),
+            "Capacidade por Tanque (L)": st.column_config.NumberColumn(min_value=0, step=1000, format="%.0f"),
+            "Capacidade (L)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
             "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
             "VMD (L/dia)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
         },
@@ -2370,11 +2462,15 @@ def render_network_admin():
                 },
             )
             new_network[station]["payment_term_days"] = int(row.get("Prazo Financeiro (dias)", 0))
-            capacity = max(float(row["Capacidade (L)"]), 0)
+            tank_count = max(int(row.get("Qtd. Tanques", 1) or 1), 1)
+            capacity_per_tank = max(float(row.get("Capacidade por Tanque (L)", 0) or 0), 0)
+            capacity = capacity_per_tank * tank_count
             stock = min(max(float(row["Estoque Atual (L)"]), 0), capacity)
             vmd = max(float(row["VMD (L/dia)"]), 0)
             new_network[station]["tanks"][product] = {
                 "capacity": capacity,
+                "capacity_per_tank": capacity_per_tank,
+                "tank_count": tank_count,
                 "stock": stock,
                 "vmd": vmd,
             }
@@ -2709,6 +2805,16 @@ def main():
     page = render_sidebar()
     if page == "Painel de Compras":
         render_main_panel(read_only=False)
+    elif page == "Medição de Estoque":
+        render_measurement_page(read_only=False)
+    elif page == "Programação Semanal":
+        render_programming_page(read_only=False)
+    elif page == "Ordem de Transporte":
+        render_transport_page(read_only=False)
+    elif page == "Mercado e Preço":
+        render_market_page(read_only=False)
+    elif page == "Financeiro":
+        render_finance_page(read_only=False)
     elif page == "Cadastro de Postos e Tanques":
         render_network_admin()
     elif page == "Configurações e Vendas":
