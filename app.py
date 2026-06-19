@@ -2333,6 +2333,9 @@ def project_loading_schedule(df, trend, days_ahead=4):
             adjusted_vmd = item["vmd"]
             if capacity <= 0 or adjusted_vmd <= 0:
                 continue
+            if day.weekday() == 6:
+                item["stock"] = max(stock - adjusted_vmd, 0)
+                continue
 
             coverage = stock / adjusted_vmd
             lead_time_days = 2
