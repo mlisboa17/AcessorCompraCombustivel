@@ -1384,13 +1384,21 @@ def finance_timing_note(load_date, payment_term_days):
     return f" Boleto previsto para {due_label} ({short_weekday(due_label)})."
 
 
+def decision_priority_note(reason):
+    if reason == "Alta prevista: comprar antes do aumento":
+        return " Prioridade: alta de preço acima do ganho financeiro do boleto."
+    if reason == "Risco de falta":
+        return " Prioridade: nao faltar produto acima de qualquer ganho financeiro."
+    return ""
+
+
 def choose_financially_best_day(candidate_days, item, volume):
     if not candidate_days:
         return None
     payment_term_days = int(item.get("Prazo Financeiro (dias)", 0))
     coverage = float(item.get("Cobertura (dias)", 0))
     reason = str(item.get("Motivo", ""))
-    if coverage <= 2.2 or reason == "Risco de falta":
+    if coverage <= 2.2 or reason in ("Risco de falta", "Alta prevista: comprar antes do aumento"):
         return candidate_days[0]
 
     first_day = candidate_days[0]["date"]
@@ -1594,6 +1602,7 @@ def build_weekly_receiving_schedule(exec_df):
         if day is None:
             day = operational_days[-1] if operational_days else days[0]
         finance_note = finance_timing_note(day["date"], item["Prazo Financeiro (dias)"])
+        priority_note = decision_priority_note(item["Motivo"])
         rows.append(
             {
                 "Chegada Prevista": day["label"],
@@ -1608,7 +1617,7 @@ def build_weekly_receiving_schedule(exec_df):
                 "Prioridade": item["Estratégia de Estoque"],
                 "Motivo": item["Motivo"],
                 "Janela de Entrega": item["Janela de Entrega"],
-                "Observação": f"{item['Recomendação']}{finance_note}",
+                "Observação": f"{item['Recomendação']}{finance_note}{priority_note}",
             }
         )
 
@@ -2653,6 +2662,7 @@ def project_loading_schedule(df, trend, days_ahead=4):
                     score = purchase_score(coverage, reorder_point_days, trend, reason, item["payment_term_days"], volume)
                     date_text = day.strftime("%d/%m/%Y")
                     finance_note = finance_timing_note(day, item["payment_term_days"])
+                    priority_note = decision_priority_note(reason)
                     rows.append(
                         {
                             "Chegada Prevista": f"{short_weekday(date_text)} {day.strftime('%d/%m')}",
@@ -2671,6 +2681,7 @@ def project_loading_schedule(df, trend, days_ahead=4):
                                 f"Estoque projetado antes da compra: {liters(stock_before)}"
                                 + (f" | Ja considera {liters(incoming_volume)} em transito" if incoming_volume > 0 else "")
                                 + finance_note
+                                + priority_note
                             ),
                         }
                     )
