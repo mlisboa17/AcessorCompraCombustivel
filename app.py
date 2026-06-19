@@ -270,6 +270,67 @@ def inject_css():
                 margin-bottom: 10px;
             }
 
+            .sidebar-brand {
+                padding: 8px 0 12px 0;
+            }
+
+            .sidebar-brand-title {
+                font-size: 1.35rem;
+                font-weight: 800;
+                color: #f8fafc;
+                margin: 0;
+            }
+
+            .sidebar-brand-subtitle {
+                color: var(--muted);
+                font-size: .82rem;
+                margin-top: 2px;
+            }
+
+            .sidebar-panel {
+                border: 1px solid var(--line);
+                background: rgba(15, 23, 42, .78);
+                border-radius: 8px;
+                padding: 10px 12px;
+                margin: 10px 0;
+            }
+
+            .sidebar-section-label {
+                color: var(--muted);
+                text-transform: uppercase;
+                font-size: .72rem;
+                font-weight: 800;
+                letter-spacing: .04em;
+                margin: 16px 0 6px 0;
+            }
+
+            .priority-strip {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+                gap: 10px;
+                margin: 10px 0 18px 0;
+            }
+
+            .priority-card {
+                border: 1px solid var(--line);
+                background: rgba(15, 23, 42, .82);
+                border-radius: 8px;
+                padding: 12px 14px;
+            }
+
+            .priority-card strong {
+                display: block;
+                font-size: .9rem;
+                color: #cbd5e1;
+                margin-bottom: 4px;
+            }
+
+            .priority-card span {
+                font-size: 1.25rem;
+                font-weight: 800;
+                color: #f8fafc;
+            }
+
             .mobile-summary-card h4 {
                 margin: 0 0 8px 0;
                 font-size: 1rem;
@@ -1837,6 +1898,29 @@ def render_station_color_legend(df):
     )
 
 
+def render_priority_overview(exec_df, weekly_schedule):
+    buy_df = exec_df[exec_df["Comprar?"] == "Sim"].copy() if not exec_df.empty else pd.DataFrame()
+    today_count = len(buy_df)
+    start = datetime.now().date()
+    end = start + timedelta(days=2)
+    next_3_volume = 0
+    if not weekly_schedule.empty:
+        temp = weekly_schedule.copy()
+        temp["_DataFiltro"] = pd.to_datetime(temp["Data"], format="%d/%m/%Y", errors="coerce")
+        next_3_volume = temp[temp["_DataFiltro"].dt.date.between(start, end)]["Comprar (L)"].sum()
+    max_score = int(exec_df["Score"].max()) if not exec_df.empty and "Score" in exec_df else 0
+    st.markdown(
+        f"""
+        <div class="priority-strip">
+            <div class="priority-card"><strong>Ações de compra</strong><span>{today_count}</span></div>
+            <div class="priority-card"><strong>Volume próximos 3 dias</strong><span>{liters(next_3_volume)}</span></div>
+            <div class="priority-card"><strong>Maior score</strong><span>{max_score}/100</span></div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 def allowed_station():
     user = st.session_state.user
     if user["role"] == "Gerente":
@@ -1847,18 +1931,31 @@ def allowed_station():
 def render_sidebar():
     user = st.session_state.user
     market = get_market_data()
-    st.sidebar.title("⛽ FuelGuard360")
-    st.sidebar.caption("Trader inteligente de combustível")
-    st.sidebar.divider()
-    st.sidebar.markdown(f"**{user['name']}**")
-    st.sidebar.caption(f"Perfil: {user['role']}")
+    st.sidebar.markdown(
+        """
+        <div class="sidebar-brand">
+            <div class="sidebar-brand-title">⛽ FuelGuard360</div>
+            <div class="sidebar-brand-subtitle">Compras, estoque e margem em um só painel</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-panel">
+            <b>{html_lib.escape(user['name'])}</b><br>
+            <span style="color:#94a3b8;">Perfil: {html_lib.escape(user['role'])}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     if user["role"] == "Gerente":
         stations = user.get("stations", [])
-        st.sidebar.caption("Postos liberados:")
+        st.sidebar.caption("Postos liberados")
         st.sidebar.write(", ".join(stations) if stations else "Nenhum posto vinculado")
     else:
-        st.sidebar.caption(f"Rede: {len(st.session_state.network)} posto(s)")
+        st.sidebar.caption(f"Rede: {len(st.session_state.network)} posto(s) ativos")
 
     if user["role"] == "Sócio":
         page_labels = {
@@ -1869,25 +1966,35 @@ def render_sidebar():
     else:
         page_labels = {"📊 Painel de Consulta": "Painel de Consulta"}
 
-    st.sidebar.divider()
+    st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
+    st.session_state.compact_mode = st.sidebar.toggle(
+        "Foco operacional",
+        value=st.session_state.get("compact_mode", True),
+        help="Mostra primeiro o que precisa de ação e deixa detalhes em blocos secundários.",
+    )
 
-    st.sidebar.divider()
-    st.sidebar.markdown("**Mercado**")
-    st.sidebar.metric("Tendência preço", market.get("trend_label", market["trend"]))
-    st.sidebar.caption(f"Atualizado: {st.session_state.last_market_update or 'pendente'}")
-    st.sidebar.caption(f"Atualização automática: {MARKET_REFRESH_HOURS}h")
+    st.sidebar.markdown('<div class="sidebar-section-label">Status rápido</div>', unsafe_allow_html=True)
+    st.sidebar.markdown(
+        f"""
+        <div class="sidebar-panel">
+            <b>Mercado:</b> {html_lib.escape(str(market.get("trend_label", market["trend"])))}<br>
+            <span style="color:#94a3b8;">Atualizado: {html_lib.escape(st.session_state.last_market_update or "pendente")}</span><br>
+            <span style="color:#94a3b8;">Banco: {html_lib.escape(supabase_status())}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
     if st.sidebar.button("Atualizar mercado", use_container_width=True):
-        get_market_data(force=True)
+        with st.spinner("Atualizando mercado..."):
+            get_market_data(force=True)
         st.rerun()
 
-    st.sidebar.divider()
-    st.sidebar.markdown("**Logística**")
-    st.sidebar.caption(f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia")
-    st.sidebar.caption(f"{liters(TRUCK_CAPACITY_LITERS)} por caminhão")
-    st.sidebar.caption(f"Capacidade diária: {liters(DAILY_DELIVERY_CAPACITY_LITERS)}")
-    st.sidebar.divider()
-    st.sidebar.caption(f"Banco: {supabase_status()}")
+    st.sidebar.markdown('<div class="sidebar-section-label">Logística</div>', unsafe_allow_html=True)
+    st.sidebar.caption(
+        f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia · {liters(TRUCK_CAPACITY_LITERS)} por caminhão · "
+        f"{liters(DAILY_DELIVERY_CAPACITY_LITERS)} por dia"
+    )
 
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.authenticated = False
@@ -1997,6 +2104,13 @@ def render_main_panel(read_only=False):
     c4.metric("🌎 Tendência Macro", trend)
     render_station_color_legend(df)
 
+    exec_df = build_executive_table(df, trend)
+    weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
+    render_manual_schedule_manager()
+    weekly_schedule = merge_manual_schedule(weekly_schedule)
+    render_priority_overview(exec_df, weekly_schedule)
+    render_mobile_recommendation_cards(exec_df, weekly_schedule)
+
     with st.expander("Medição física do dia", expanded=False):
         if read_only:
             st.caption("Perfil de consulta. Medições e compras são editadas pelo sócio.")
@@ -2024,32 +2138,32 @@ def render_main_panel(read_only=False):
             save_network_to_supabase(st.session_state.network)
             st.rerun()
 
-    st.subheader("Mercado online")
-    m1, m2, m3, m4 = st.columns([1, 1, 1, 1.1])
-    m1.metric("💵 Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
-    m2.metric("🛢️ Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
-    m3.metric("Sinal", trend)
-    if m4.button("Atualizar mercado", use_container_width=True):
-        get_market_data(force=True)
-        st.rerun()
-    st.caption(
-        f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'} | "
-        f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
-    )
-    st.caption(market.get("source_detail", ""))
     st.subheader("Saída executiva de compra")
-    exec_df = build_executive_table(df, trend)
-    weekly_schedule, base_calendar = build_weekly_receiving_schedule(exec_df)
-    render_manual_schedule_manager()
-    weekly_schedule = merge_manual_schedule(weekly_schedule)
     price_delta = render_price_simulator(exec_df, weekly_schedule)
-    render_mobile_recommendation_cards(exec_df, weekly_schedule)
+
+    week_df = exec_df[
+        (exec_df["Comprar?"] == "Sim")
+        & (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)
+    ].copy()
+    if not week_df.empty:
+        st.markdown("#### Ênfase da semana")
+        for _, row in week_df.head(5).iterrows():
+            st.markdown(
+                f"""
+                <div class="signal-card signal-up">
+                    <div class="signal-title">{row['Posto']} · {row['Produto']}</div>
+                    <p class="signal-text">Comprar <b>{liters(row['Volume'])}</b>. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
+                </div>
+                """.replace(",", "."),
+                unsafe_allow_html=True,
+            )
 
     st.markdown("#### Programação semanal de recebimento")
     st.caption(
         f"Janela móvel de 7 dias a partir de amanhã. Domingo não opera. "
         f"Capacidade planejada: {AVAILABLE_TRUCKS_PER_DAY} caminhões de {liters(TRUCK_CAPACITY_LITERS)} por dia."
     )
+    st.caption("Use esta tabela para decidir o que carregar; use a ordem de transporte para repassar a rota/carga.")
     with st.expander("Calendário e capacidade da base", expanded=False):
         st.dataframe(
             base_calendar,
@@ -2074,7 +2188,22 @@ def render_main_panel(read_only=False):
         )
         render_transport_order(weekly_schedule)
 
+    st.subheader("Mercado e contexto")
     render_market_signal(market)
+    with st.expander("Indicadores de mercado", expanded=not st.session_state.get("compact_mode", True)):
+        m1, m2, m3, m4 = st.columns([1, 1, 1, 1.1])
+        m1.metric("💵 Dólar USD/BRL", money(market.get("usd")), f"{market.get('usd_delta', 0):.2f}%")
+        m2.metric("🛢️ Brent", money(market.get("brent")), f"{market.get('brent_delta', 0):.2f}%")
+        m3.metric("Sinal", trend)
+        if m4.button("Atualizar mercado", use_container_width=True, help="Atualiza Brent e dólar agora. O app também atualiza automaticamente a cada 3 horas."):
+            with st.spinner("Atualizando mercado..."):
+                get_market_data(force=True)
+            st.rerun()
+        st.caption(
+            f"Fonte: {market['source']} | Última atualização: {st.session_state.last_market_update or 'não executada'} | "
+            f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
+        )
+        st.caption(market.get("source_detail", ""))
     with st.expander("Radar de mercado", expanded=False):
         render_market_radar(market)
 
@@ -2084,26 +2213,10 @@ def render_main_panel(read_only=False):
             st.markdown(station_badge_html(station), unsafe_allow_html=True)
             st.plotly_chart(donut_chart(station, station_df), use_container_width=True)
 
-    week_df = exec_df[
-        (exec_df["Comprar?"] == "Sim")
-        & (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)
-    ].copy()
-    if not week_df.empty:
-        st.markdown("#### Ênfase da semana")
-        for _, row in week_df.head(8).iterrows():
-            st.markdown(
-                f"""
-                <div class="signal-card signal-up">
-                    <div class="signal-title">{row['Posto']} · {row['Produto']}</div>
-                    <p class="signal-text">Comprar <b>{liters(row['Volume'])}</b> uma vez nesta programação. Cobertura atual: {row['Cobertura (dias)']:.1f} dias. {row['Recomendação']}</p>
-                </div>
-                """.replace(",", "."),
-                unsafe_allow_html=True,
-            )
-    else:
+    if week_df.empty:
         st.info("Nenhum produto fecha compra mínima de 5.000 L com prioridade nesta semana.", icon="✅")
 
-    with st.expander("Tabela executiva completa", expanded=False):
+    with st.expander("Tabela executiva completa", expanded=not st.session_state.get("compact_mode", True)):
         exec_df_view = filter_table(exec_df, "executive_table", "Filtros da saída executiva")
         st.dataframe(
             exec_df_view.style.apply(highlight_priority, axis=1),
@@ -2118,7 +2231,7 @@ def render_main_panel(read_only=False):
                 "Prazo Financeiro (dias)": st.column_config.NumberColumn(format="%d"),
             },
         )
-    with st.expander("Financeiro e histórico", expanded=False):
+    with st.expander("Financeiro e histórico", expanded=not st.session_state.get("compact_mode", True)):
         render_financial_control(weekly_schedule, price_delta)
         render_decision_history(exec_df, weekly_schedule, price_delta)
 
