@@ -5,6 +5,7 @@ import math
 import os
 import re
 from datetime import datetime, timedelta
+from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -406,6 +407,101 @@ def inject_css():
                 color: #f8fafc;
             }
 
+            .tomorrow-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+                gap: 14px;
+                margin: 14px 0 22px 0;
+            }
+
+            .tomorrow-card {
+                display: block;
+                text-decoration: none !important;
+                color: inherit !important;
+                border: 1px solid var(--line);
+                border-radius: 10px;
+                padding: 16px;
+                background: rgba(15, 23, 42, .92);
+                box-shadow: 0 14px 38px rgba(0, 0, 0, .24);
+                transition: transform .14s ease, border-color .14s ease, box-shadow .14s ease;
+                min-height: 210px;
+            }
+
+            .tomorrow-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 18px 48px rgba(0, 0, 0, .30);
+                border-color: rgba(56, 189, 248, .55);
+            }
+
+            .tomorrow-card:active {
+                transform: scale(.985);
+            }
+
+            .tomorrow-card-top {
+                display: flex;
+                align-items: flex-start;
+                justify-content: space-between;
+                gap: 10px;
+                margin-bottom: 12px;
+            }
+
+            .tomorrow-card-title {
+                font-size: 1.08rem;
+                line-height: 1.2;
+                font-weight: 850;
+                color: #f8fafc;
+            }
+
+            .priority-pill {
+                border-radius: 999px;
+                padding: 5px 9px;
+                font-size: .76rem;
+                font-weight: 850;
+                white-space: nowrap;
+                color: #0f172a;
+            }
+
+            .priority-alta { background: #fca5a5; }
+            .priority-media { background: #fde68a; }
+            .priority-baixa { background: #86efac; }
+
+            .tomorrow-product-list {
+                display: grid;
+                gap: 8px;
+                margin: 12px 0;
+            }
+
+            .tomorrow-product-row {
+                display: flex;
+                justify-content: space-between;
+                gap: 12px;
+                padding: 9px 10px;
+                border-radius: 8px;
+                background: rgba(2, 6, 23, .30);
+                border: 1px solid rgba(148, 163, 184, .12);
+            }
+
+            .tomorrow-product-row span:first-child {
+                color: #e5e7eb;
+                font-weight: 700;
+            }
+
+            .tomorrow-product-row span:last-child {
+                color: #f8fafc;
+                font-weight: 850;
+                white-space: nowrap;
+            }
+
+            .tomorrow-card-footer {
+                margin-top: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                color: #cbd5e1;
+                font-size: .88rem;
+            }
+
             @media (max-width: 640px) {
                 .block-container {
                     padding-left: .55rem;
@@ -461,6 +557,20 @@ def inject_css():
                 .mobile-card-grid {
                     grid-template-columns: 1fr;
                     gap: 10px;
+                }
+
+                .tomorrow-grid {
+                    grid-template-columns: 1fr;
+                    gap: 12px;
+                }
+
+                .tomorrow-card {
+                    min-height: auto;
+                    padding: 14px;
+                }
+
+                .tomorrow-card-title {
+                    font-size: 1rem;
                 }
 
                 .mobile-summary-card {
@@ -2120,6 +2230,175 @@ def render_loading_mobile_cards(source, title="Resumo mobile"):
     st.markdown("".join(cards), unsafe_allow_html=True)
 
 
+def priority_from_score(score):
+    score = float(score or 0)
+    if score >= 75:
+        return "Alta", 0
+    if score >= 45:
+        return "Média", 1
+    return "Baixa", 2
+
+
+def tomorrow_schedule_by_station(weekly_schedule):
+    if weekly_schedule.empty:
+        return []
+    tomorrow = now_local().date() + timedelta(days=1)
+    source = weekly_schedule.copy()
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    source = source[source["_DataFiltro"].dt.date == tomorrow].copy()
+    if source.empty:
+        return []
+
+    cards = []
+    for station, station_df in source.groupby("Posto", sort=False):
+        max_score = float(station_df["Score"].max()) if "Score" in station_df else 0
+        priority, rank = priority_from_score(max_score)
+        products = []
+        total_volume = 0
+        for _, row in station_df.sort_values(["Score", "Produto"], ascending=[False, True]).iterrows():
+            volume = float(row["Comprar (L)"])
+            total_volume += volume
+            products.append(
+                {
+                    "name": row["Produto"],
+                    "code": product_transport_code(row["Produto"]),
+                    "volume": volume,
+                }
+            )
+        cards.append(
+            {
+                "station": station,
+                "priority": priority,
+                "priority_rank": rank,
+                "score": max_score,
+                "products": products,
+                "total_volume": total_volume,
+                "date": tomorrow.strftime("%d/%m/%Y"),
+                "weekday": short_weekday(tomorrow.strftime("%d/%m/%Y")),
+            }
+        )
+    return sorted(cards, key=lambda item: (item["priority_rank"], -item["score"], item["station"]))
+
+
+def render_tomorrow_loading_cards(cards):
+    if not cards:
+        st.info("Nenhum carregamento sugerido para amanhã com a programação atual.")
+        return
+
+    html_cards = ['<div class="tomorrow-grid">']
+    for card in cards:
+        style = station_style(card["station"])
+        priority_class = {
+            "Alta": "priority-alta",
+            "Média": "priority-media",
+            "Baixa": "priority-baixa",
+        }.get(card["priority"], "priority-baixa")
+        product_rows = []
+        for product in card["products"]:
+            product_rows.append(
+                '<div class="tomorrow-product-row">'
+                f'<span>{html_lib.escape(product["code"])}</span>'
+                f'<span>{liters(product["volume"])}</span>'
+                "</div>"
+            )
+        station_param = quote(card["station"])
+        html_cards.append(
+            f'<a class="tomorrow-card" href="?posto_programacao={station_param}" '
+            f'style="background:{style["bg"]}; border-color:{style["border"]}; border-left:6px solid {style["accent"]};">'
+            '<div class="tomorrow-card-top">'
+            f'<div class="tomorrow-card-title">{html_lib.escape(card["station"])}</div>'
+            f'<div class="priority-pill {priority_class}">{html_lib.escape(card["priority"])}</div>'
+            '</div>'
+            '<div class="small-muted">Carregar amanhã</div>'
+            '<div class="tomorrow-product-list">'
+            + "".join(product_rows) +
+            '</div>'
+            '<div class="tomorrow-card-footer">'
+            f'<span>{html_lib.escape(card["weekday"])} - {html_lib.escape(card["date"])}</span>'
+            f'<strong>{liters(card["total_volume"])}</strong>'
+            '</div>'
+            '</a>'
+        )
+    html_cards.append("</div>")
+    st.markdown("".join(html_cards), unsafe_allow_html=True)
+
+
+def selected_station_from_query():
+    try:
+        value = st.query_params.get("posto_programacao")
+    except Exception:
+        value = None
+    if isinstance(value, list):
+        value = value[0] if value else None
+    return unquote(value) if value else None
+
+
+def render_station_week_plan(station, weekly_schedule):
+    source = weekly_schedule.copy()
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=7)
+    source = source[
+        (source["Posto"] == station)
+        & source["_DataFiltro"].dt.date.between(start, end)
+    ].copy()
+
+    st.markdown(f"#### Programação sugerida - {station}")
+    st.caption("Simulação considerando que as sugestões do sistema serão aceitas para os próximos sete dias.")
+    st.markdown('<a class="stButton" href="?">Voltar para cards</a>', unsafe_allow_html=True)
+
+    if source.empty:
+        st.info("Não há programação sugerida para este posto no período.")
+        return
+
+    source["Carregamento"] = source["Data"].apply(lambda value: f"{short_weekday(value)} - {value}")
+    detail_columns = [
+        "Posto",
+        "Carregamento",
+        "Produto",
+        "Comprar (L)",
+        "Autonomia Atual",
+        "Score",
+        "Motivo",
+        "Observação",
+    ]
+    view = source[[col for col in detail_columns if col in source.columns]].sort_values(["Carregamento", "Produto"])
+    st.dataframe(
+        view.style.apply(style_rows_by_station, axis=1),
+        hide_index=True,
+        use_container_width=True,
+        column_config={
+            "Posto": None,
+            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Autonomia Atual": st.column_config.NumberColumn(format="%.1f"),
+            "Score": st.column_config.NumberColumn(format="%.0f"),
+        },
+    )
+
+    lines = [station.upper(), ""]
+    for date_text, day_df in source.sort_values(["_DataFiltro", "Produto"]).groupby("Data", sort=False):
+        lines.append(f"> {short_weekday(date_text)} - {date_text[:5]}")
+        for _, row in day_df.iterrows():
+            lines.append(f"{product_transport_code(row['Produto'])} {int(row['Comprar (L)'])}")
+        lines.append("")
+    st.text_area("Resumo para transporte", "\n".join(lines).strip(), height=220)
+
+
+def render_tomorrow_loading_page(read_only=False):
+    header(
+        "Carregar Amanhã",
+        "Cards por posto com sugestão de carga para amanhã. Toque em um card para ver a semana sugerida.",
+    )
+    _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
+    selected_station = selected_station_from_query()
+    if selected_station:
+        render_station_week_plan(selected_station, weekly_schedule)
+        return
+
+    cards = tomorrow_schedule_by_station(weekly_schedule)
+    render_tomorrow_loading_cards(cards)
+
+
 def render_transport_order(schedule):
     st.markdown("#### Ordem para transporte")
     if schedule.empty:
@@ -2303,6 +2582,7 @@ def render_sidebar():
 
     if user["role"] == "Sócio":
         page_labels = {
+            "Carregar Amanhã": "Carregar Amanhã",
             "Visão Geral": "Painel de Compras",
             "Painel de Carregamentos": "Painel de Carregamentos",
             "Medição de Estoque": "Medição de Estoque",
@@ -2314,7 +2594,7 @@ def render_sidebar():
             "Configurações": "Configurações e Vendas",
         }
     else:
-        page_labels = {"Painel de Consulta": "Painel de Consulta"}
+        page_labels = {"Carregar Amanhã": "Carregar Amanhã", "Painel de Consulta": "Painel de Consulta"}
 
     st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
@@ -3253,7 +3533,9 @@ def main():
         return
 
     page = render_sidebar()
-    if page == "Painel de Compras":
+    if page == "Carregar Amanhã":
+        render_tomorrow_loading_page(read_only=st.session_state.user["role"] == "Gerente")
+    elif page == "Painel de Compras":
         render_main_panel(read_only=False)
     elif page == "Painel de Carregamentos":
         render_loading_orders_page(read_only=False)
