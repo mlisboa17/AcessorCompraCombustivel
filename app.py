@@ -2318,22 +2318,38 @@ def loading_schedule_by_station(weekly_schedule, days_ahead=4):
     if source.empty:
         return []
 
+    period_days = [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
     cards = []
     for station, station_df in source.groupby("Posto", sort=False):
         max_score = float(station_df["Score"].max()) if "Score" in station_df else 0
         priority, rank = priority_from_score(max_score)
-        products = []
+        days = []
         total_volume = 0
-        for _, row in station_df.sort_values(["_DataFiltro", "Score", "Produto"], ascending=[True, False, True]).iterrows():
-            volume = float(row["Comprar (L)"])
-            total_volume += volume
-            products.append(
+        for day in period_days:
+            day_text = day.strftime("%d/%m/%Y")
+            day_df = station_df[station_df["_DataFiltro"].dt.date == day].sort_values(
+                ["Score", "Produto"],
+                ascending=[False, True],
+            )
+            products = []
+            day_volume = 0.0
+            for _, row in day_df.iterrows():
+                volume = float(row["Comprar (L)"])
+                day_volume += volume
+                total_volume += volume
+                products.append(
+                    {
+                        "name": row["Produto"],
+                        "code": product_transport_code(row["Produto"]),
+                        "volume": volume,
+                    }
+                )
+            days.append(
                 {
-                    "name": row["Produto"],
-                    "code": product_transport_code(row["Produto"]),
-                    "volume": volume,
-                    "date": row["Data"],
-                    "weekday": short_weekday(row["Data"]),
+                    "date": day_text,
+                    "weekday": short_weekday(day_text),
+                    "volume": day_volume,
+                    "products": products,
                 }
             )
         cards.append(
@@ -2342,7 +2358,7 @@ def loading_schedule_by_station(weekly_schedule, days_ahead=4):
                 "priority": priority,
                 "priority_rank": rank,
                 "score": max_score,
-                "products": products,
+                "days": days,
                 "total_volume": total_volume,
                 "start_date": start.strftime("%d/%m/%Y"),
                 "end_date": end.strftime("%d/%m/%Y"),
@@ -2432,13 +2448,22 @@ def render_tomorrow_loading_cards(cards, days_ahead=4):
             "Baixa": "priority-baixa",
         }.get(card["priority"], "priority-baixa")
         product_rows = []
-        for product in card["products"]:
-            product_rows.append(
-                '<div class="tomorrow-product-row">'
-                f'<span>{html_lib.escape(product["weekday"])} {html_lib.escape(product["date"][:5])} - {html_lib.escape(product["code"])}</span>'
-                f'<span>{liters(product["volume"])}</span>'
-                "</div>"
-            )
+        for day in card["days"]:
+            if day["products"]:
+                for product in day["products"]:
+                    product_rows.append(
+                        '<div class="tomorrow-product-row">'
+                        f'<span>{html_lib.escape(day["weekday"])} {html_lib.escape(day["date"][:5])} - {html_lib.escape(product["code"])}</span>'
+                        f'<span>{liters(product["volume"])}</span>'
+                        "</div>"
+                    )
+            else:
+                product_rows.append(
+                    '<div class="tomorrow-product-row">'
+                    f'<span>{html_lib.escape(day["weekday"])} {html_lib.escape(day["date"][:5])}</span>'
+                    '<span>Sem carga</span>'
+                    "</div>"
+                )
         html_cards.append(
             f'<div class="tomorrow-card" '
             f'style="background:{style["bg"]}; border-color:{style["border"]}; border-left:6px solid {style["accent"]};">'
