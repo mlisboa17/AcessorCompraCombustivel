@@ -1360,6 +1360,53 @@ def delivery_window(stock, capacity, adjusted_vmd, volume):
     }
 
 
+def payment_due_date(load_date, payment_term_days):
+    return load_date + timedelta(days=max(int(payment_term_days or 0), 0))
+
+
+def payment_weekend_gain(load_date, payment_term_days):
+    due_date = payment_due_date(load_date, payment_term_days)
+    if due_date.weekday() == 5:
+        return 2
+    if due_date.weekday() == 6:
+        return 1
+    return 0
+
+
+def finance_timing_note(load_date, payment_term_days):
+    if not payment_term_days:
+        return ""
+    due_date = payment_due_date(load_date, payment_term_days)
+    gain_days = payment_weekend_gain(load_date, payment_term_days)
+    due_label = due_date.strftime("%d/%m/%Y")
+    if gain_days:
+        return f" Boleto previsto para {due_label} ({short_weekday(due_label)}), com ganho financeiro estimado de {gain_days} dia(s)."
+    return f" Boleto previsto para {due_label} ({short_weekday(due_label)})."
+
+
+def choose_financially_best_day(candidate_days, item, volume):
+    if not candidate_days:
+        return None
+    payment_term_days = int(item.get("Prazo Financeiro (dias)", 0))
+    coverage = float(item.get("Cobertura (dias)", 0))
+    reason = str(item.get("Motivo", ""))
+    if coverage <= 2.2 or reason == "Risco de falta":
+        return candidate_days[0]
+
+    first_day = candidate_days[0]["date"]
+    latest_safe_day = first_day + timedelta(days=max(math.floor(coverage - 0.5), 0))
+    candidate_days = [candidate_day for candidate_day in candidate_days if candidate_day["date"] <= latest_safe_day] or [candidate_days[0]]
+    best_day = candidate_days[0]
+    best_score = (-1, 0)
+    for index, candidate_day in enumerate(candidate_days):
+        gain_days = payment_weekend_gain(candidate_day["date"], payment_term_days)
+        score = (gain_days, -index)
+        if score > best_score:
+            best_score = score
+            best_day = candidate_day
+    return best_day
+
+
 def proportional_target_days(row, adjusted_vmd, base_target_days):
     station = row["Posto"]
     records = network_records([station])
@@ -1540,14 +1587,13 @@ def build_weekly_receiving_schedule(exec_df):
     rows = []
     for _, item in candidates.iterrows():
         volume = float(item["Volume"])
-        day = None
-        for candidate_day in operational_days:
-            if remaining_capacity[candidate_day["date"]] >= volume:
-                day = candidate_day
-                remaining_capacity[candidate_day["date"]] -= volume
-                break
+        viable_days = [candidate_day for candidate_day in operational_days if remaining_capacity[candidate_day["date"]] >= volume]
+        day = choose_financially_best_day(viable_days, item, volume)
+        if day is not None:
+            remaining_capacity[day["date"]] -= volume
         if day is None:
             day = operational_days[-1] if operational_days else days[0]
+        finance_note = finance_timing_note(day["date"], item["Prazo Financeiro (dias)"])
         rows.append(
             {
                 "Chegada Prevista": day["label"],
@@ -1562,7 +1608,7 @@ def build_weekly_receiving_schedule(exec_df):
                 "Prioridade": item["Estratégia de Estoque"],
                 "Motivo": item["Motivo"],
                 "Janela de Entrega": item["Janela de Entrega"],
-                "Observação": item["Recomendação"],
+                "Observação": f"{item['Recomendação']}{finance_note}",
             }
         )
 
@@ -1648,7 +1694,8 @@ def build_financial_schedule(weekly_schedule, price_delta):
     for _, row in weekly_schedule.iterrows():
         arrival = datetime.strptime(row["Data"], "%d/%m/%Y").date()
         term = int(row.get("Prazo Financeiro (dias)", 0))
-        due_date = arrival + timedelta(days=term)
+        due_date = payment_due_date(arrival, term)
+        weekend_gain = payment_weekend_gain(arrival, term)
         volume = float(row["Comprar (L)"])
         rows.append(
             {
@@ -1658,8 +1705,10 @@ def build_financial_schedule(weekly_schedule, price_delta):
                 "Volume (L)": volume,
                 "Prazo (dias)": term,
                 "Vencimento Boleto": due_date.strftime("%d/%m/%Y"),
+                "Dia Vencimento": short_weekday(due_date.strftime("%d/%m/%Y")),
+                "Ganho Fim de Semana (dias)": weekend_gain,
                 "Impacto Caixa Simulado": round(volume * price_delta, 2),
-                "Melhor Dia para Faturar": row["Data"],
+                "Melhor Dia para Faturar": row["Data"] if weekend_gain else "Sem ganho de fim de semana",
             }
         )
     return pd.DataFrame(rows)
@@ -1724,6 +1773,15 @@ def render_financial_control(weekly_schedule, price_delta):
             "Produto": text_column("Produto"),
             "Volume (L)": st.column_config.NumberColumn("Volume (L)", help="Volume programado para compra/recebimento.", format="%.0f"),
             "Prazo (dias)": st.column_config.NumberColumn("Prazo (dias)", help="Prazo financeiro usado para estimar o vencimento do boleto.", format="%d"),
+            "Dia Vencimento": st.column_config.TextColumn(
+                "Dia Vencimento",
+                help="Dia da semana do vencimento calculado pelo prazo financeiro.",
+            ),
+            "Ganho Fim de Semana (dias)": st.column_config.NumberColumn(
+                "Ganho Fim de Semana (dias)",
+                help="Dias extras estimados quando o vencimento cai em sábado ou domingo.",
+                format="%d",
+            ),
             "Impacto Caixa Simulado": st.column_config.NumberColumn(
                 "Impacto Caixa Simulado",
                 help="Impacto estimado no caixa com base na variação de preço simulada.",
@@ -2577,12 +2635,24 @@ def project_loading_schedule(df, trend, days_ahead=4):
                 else:
                     target_stock = min(capacity, adjusted_vmd * target_days)
                     reason = "Alta prevista: comprar antes do aumento"
+                next_day = day + timedelta(days=1)
+                can_delay_for_finance = (
+                    not shortage_risk
+                    and trend != "ALTA"
+                    and next_day <= end
+                    and next_day.weekday() != 6
+                    and payment_weekend_gain(next_day, item["payment_term_days"]) > payment_weekend_gain(day, item["payment_term_days"])
+                )
+                if can_delay_for_finance:
+                    item["stock"] = max(stock - adjusted_vmd, 0)
+                    continue
                 volume = round_to_truck_compartment(max(target_stock - stock, 0), headroom)
                 if volume > 0:
                     stock_before = stock
                     stock = min(stock + volume, capacity)
                     score = purchase_score(coverage, reorder_point_days, trend, reason, item["payment_term_days"], volume)
                     date_text = day.strftime("%d/%m/%Y")
+                    finance_note = finance_timing_note(day, item["payment_term_days"])
                     rows.append(
                         {
                             "Chegada Prevista": f"{short_weekday(date_text)} {day.strftime('%d/%m')}",
@@ -2600,6 +2670,7 @@ def project_loading_schedule(df, trend, days_ahead=4):
                             "Observacao": (
                                 f"Estoque projetado antes da compra: {liters(stock_before)}"
                                 + (f" | Ja considera {liters(incoming_volume)} em transito" if incoming_volume > 0 else "")
+                                + finance_note
                             ),
                         }
                     )
