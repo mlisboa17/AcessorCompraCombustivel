@@ -49,6 +49,10 @@ AVAILABLE_TRUCKS_PER_DAY = 2
 DAILY_DELIVERY_CAPACITY_LITERS = TRUCK_CAPACITY_LITERS * AVAILABLE_TRUCKS_PER_DAY
 MARKET_REFRESH_HOURS = 3
 APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
+VIBRA_STANDARD_ORDER_DEADLINE_HOUR = 16
+VIBRA_STANDARD_CHANGE_DEADLINE_HOUR = 14
+SATURDAY_ORDER_DEADLINE_HOUR = 11
+SATURDAY_LOAD_CHANGE_DEADLINE_HOUR = 12
 DATA_VERSION = "pdf-litragem-2026-06-18-vmd-17dias-prazo-logistica"
 PRODUCTS = [
     "Gasolina Comum",
@@ -1813,6 +1817,169 @@ def product_transport_code(product):
     return codes.get(normalized, product)
 
 
+def combine_local_datetime(day, hour, minute=0):
+    return datetime(day.year, day.month, day.day, hour, minute, tzinfo=APP_TIMEZONE)
+
+
+def previous_weekday(base_day, target_weekday):
+    days_back = (base_day.weekday() - target_weekday) % 7
+    if days_back == 0:
+        days_back = 7
+    return base_day - timedelta(days=days_back)
+
+
+def next_weekday(base_day, target_weekday):
+    days_forward = (target_weekday - base_day.weekday()) % 7
+    return base_day + timedelta(days=days_forward)
+
+
+def loading_batch(load_date):
+    if load_date.weekday() in (0, 1, 2):
+        return "Lote Inicio de Semana"
+    return "Lote Final de Semana"
+
+
+def batch_transport_deadline(load_date):
+    if loading_batch(load_date) == "Lote Inicio de Semana":
+        friday = previous_weekday(load_date, 4)
+        return combine_local_datetime(friday, 12)
+    monday = previous_weekday(load_date, 0)
+    tuesday = monday + timedelta(days=1)
+    return combine_local_datetime(tuesday, 12)
+
+
+def vibra_order_deadline(load_date):
+    if load_date.weekday() == 0:
+        saturday = previous_weekday(load_date, 5)
+        return combine_local_datetime(saturday, SATURDAY_ORDER_DEADLINE_HOUR)
+    previous_day = load_date - timedelta(days=1)
+    return combine_local_datetime(previous_day, VIBRA_STANDARD_ORDER_DEADLINE_HOUR)
+
+
+def vibra_change_deadline(load_date):
+    if load_date.weekday() == 5:
+        friday = previous_weekday(load_date, 4)
+        return combine_local_datetime(friday, SATURDAY_LOAD_CHANGE_DEADLINE_HOUR)
+    previous_day = load_date - timedelta(days=1)
+    return combine_local_datetime(previous_day, VIBRA_STANDARD_CHANGE_DEADLINE_HOUR)
+
+
+def deadline_label(value):
+    return value.strftime("%d/%m/%Y %H:%M")
+
+
+def order_tracking_key(row):
+    return "|".join(
+        [
+            str(row.get("Data", "")),
+            str(row.get("Posto", "")),
+            str(row.get("Produto", "")),
+            str(int(float(row.get("Comprar (L)", 0) or 0))),
+        ]
+    )
+
+
+def loading_order_status(row, now=None):
+    now = now or now_local()
+    inserted = bool(row.get("Inserido na Vibra", False))
+    sent = bool(row.get("Enviado ao Transportador", False))
+    if inserted and sent:
+        return "Pronto"
+    if now > row["Prazo Vibra"]:
+        return "Urgente"
+    if now > row["Prazo Transporte"]:
+        return "Em risco"
+    if inserted and not sent:
+        return "Falta transporte"
+    if sent and not inserted:
+        return "Falta Vibra"
+    return "Pendente"
+
+
+def loading_status_note(row, now=None):
+    now = now or now_local()
+    if row["Status"] == "Pronto":
+        return "Pedido inserido e transportador informado."
+    if now > row["Prazo Vibra"]:
+        return "Fora do prazo padrao da Vibra; tratar como urgencia."
+    if now > row["Prazo Transporte"]:
+        return "Fora do fluxo garantido de transporte."
+    return "Dentro do prazo operacional."
+
+
+def build_loading_orders(schedule):
+    columns = [
+        "Lote",
+        "Data",
+        "Posto",
+        "Produto",
+        "Comprar (L)",
+        "Compartimentos",
+        "Prazo Vibra",
+        "Prazo Alterar/Cancelar",
+        "Prazo Transporte",
+        "Inserido na Vibra",
+        "Enviado ao Transportador",
+        "Status",
+        "Observacao Operacional",
+    ]
+    if schedule.empty:
+        return pd.DataFrame(columns=columns)
+
+    tracking = st.session_state.setdefault("loading_order_statuses", {})
+    rows = []
+    for _, item in schedule.iterrows():
+        load_date = datetime.strptime(str(item["Data"]), "%d/%m/%Y").date()
+        key = order_tracking_key(item)
+        stored = tracking.get(key, {})
+        row = {
+            "Chave": key,
+            "Lote": loading_batch(load_date),
+            "Data": item["Data"],
+            "Posto": item["Posto"],
+            "Produto": item["Produto"],
+            "Comprar (L)": float(item["Comprar (L)"]),
+            "Compartimentos": int(item["Compartimentos"]),
+            "Prazo Vibra": vibra_order_deadline(load_date),
+            "Prazo Alterar/Cancelar": vibra_change_deadline(load_date),
+            "Prazo Transporte": batch_transport_deadline(load_date),
+            "Inserido na Vibra": bool(stored.get("inserted_vibra", False)),
+            "Enviado ao Transportador": bool(stored.get("sent_transport", False)),
+        }
+        row["Status"] = loading_order_status(row)
+        row["Observacao Operacional"] = loading_status_note(row)
+        rows.append(row)
+
+    result = pd.DataFrame(rows)
+    result = result.sort_values(["Lote", "Prazo Transporte", "Data", "Posto", "Produto"])
+    for col in ["Prazo Vibra", "Prazo Alterar/Cancelar", "Prazo Transporte"]:
+        result[col] = result[col].apply(deadline_label)
+    return result[columns + ["Chave"]]
+
+
+def style_loading_orders(row):
+    status = row.get("Status", "")
+    if status == "Urgente":
+        return ["background-color: rgba(239, 68, 68, .22); border-left: 4px solid #ef4444"] * len(row)
+    if status == "Em risco":
+        return ["background-color: rgba(245, 158, 11, .20); border-left: 4px solid #f59e0b"] * len(row)
+    if status in ("Falta transporte", "Falta Vibra", "Pendente"):
+        return ["background-color: rgba(56, 189, 248, .12); border-left: 4px solid #38bdf8"] * len(row)
+    return style_rows_by_station(row)
+
+
+def save_loading_tracking(orders_df):
+    tracking = st.session_state.setdefault("loading_order_statuses", {})
+    for _, row in orders_df.iterrows():
+        key = row.get("Chave")
+        if not key:
+            continue
+        tracking[key] = {
+            "inserted_vibra": bool(row.get("Inserido na Vibra", False)),
+            "sent_transport": bool(row.get("Enviado ao Transportador", False)),
+        }
+
+
 def render_transport_order(schedule):
     st.markdown("#### Ordem para transporte")
     if schedule.empty:
@@ -1997,6 +2164,7 @@ def render_sidebar():
     if user["role"] == "Sócio":
         page_labels = {
             "📊 Visão Geral": "Painel de Compras",
+            "📦 Painel de Carregamentos": "Painel de Carregamentos",
             "🧾 Medição de Estoque": "Medição de Estoque",
             "📅 Programação Semanal": "Programação Semanal",
             "🚚 Ordem de Transporte": "Ordem de Transporte",
@@ -2273,6 +2441,118 @@ def render_transport_page(read_only=False):
         st.info("Nenhuma carga programada para transporte.", icon="✅")
     else:
         render_transport_order(weekly_schedule)
+
+
+def render_loading_orders_page(read_only=False):
+    header(
+        "Painel de Carregamentos",
+        "Controle diario dos pedidos Vibra, prazos de alteracao e comunicacao com o transportador.",
+    )
+    _, _, _, _, weekly_schedule, _ = purchase_context(read_only)
+    orders_df = build_loading_orders(weekly_schedule)
+    if orders_df.empty:
+        st.info("Nenhum carregamento programado para controlar.", icon="✅")
+        return
+
+    visible_df = orders_df.drop(columns=["Chave"]).copy()
+    total_orders = len(visible_df)
+    urgent_count = int((visible_df["Status"] == "Urgente").sum())
+    risk_count = int((visible_df["Status"] == "Em risco").sum())
+    ready_count = int((visible_df["Status"] == "Pronto").sum())
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Pedidos", total_orders)
+    c2.metric("Urgentes", urgent_count)
+    c3.metric("Em risco", risk_count)
+    c4.metric("Prontos", ready_count)
+
+    st.markdown("#### Regras operacionais")
+    rule_cols = st.columns(2)
+    rule_cols[0].info(
+        "Lote Inicio de Semana: carregamentos de segunda, terca e quarta. "
+        "Inserir na Vibra e avisar transporte ate sexta-feira 12:00.",
+        icon="📌",
+    )
+    rule_cols[1].info(
+        "Lote Final de Semana: carregamentos de quinta, sexta e sabado. "
+        "Inserir na Vibra e avisar transporte ate terca-feira 12:00.",
+        icon="📌",
+    )
+    st.caption(
+        "Regra Vibra: pedido ate 16:00 do dia anterior. Para carregamento de segunda, sabado ate 11:00. "
+        "Alteracao/cancelamento: normalmente ate 14:00 do dia anterior; para carregamento de sabado, sexta ate 12:00."
+    )
+
+    filter_cols = st.columns(3)
+    lote_options = ["Todos"] + sorted(visible_df["Lote"].dropna().unique().tolist())
+    status_options = ["Todos"] + sorted(visible_df["Status"].dropna().unique().tolist())
+    selected_lote = filter_cols[0].selectbox("Lote", lote_options)
+    selected_status = filter_cols[1].selectbox("Status", status_options)
+    selected_days = filter_cols[2].slider("Dias exibidos", min_value=1, max_value=7, value=7)
+
+    source = orders_df.copy()
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    end_date = now_local().date() + timedelta(days=selected_days - 1)
+    source = source[source["_DataFiltro"].dt.date <= end_date]
+    if selected_lote != "Todos":
+        source = source[source["Lote"] == selected_lote]
+    if selected_status != "Todos":
+        source = source[source["Status"] == selected_status]
+
+    if source.empty:
+        st.warning("Nenhum pedido encontrado para os filtros selecionados.")
+        return
+
+    editable = source.drop(columns=["_DataFiltro"]).copy()
+    edited = st.data_editor(
+        editable,
+        hide_index=True,
+        use_container_width=True,
+        disabled=[
+            "Lote",
+            "Data",
+            "Posto",
+            "Produto",
+            "Comprar (L)",
+            "Compartimentos",
+            "Prazo Vibra",
+            "Prazo Alterar/Cancelar",
+            "Prazo Transporte",
+            "Status",
+            "Observacao Operacional",
+            "Chave",
+        ],
+        column_config={
+            "Comprar (L)": st.column_config.NumberColumn(format="%.0f"),
+            "Compartimentos": st.column_config.NumberColumn(format="%d"),
+            "Inserido na Vibra": st.column_config.CheckboxColumn("Inserido na Vibra"),
+            "Enviado ao Transportador": st.column_config.CheckboxColumn("Enviado ao Transportador"),
+            "Chave": None,
+        },
+    )
+    if st.button("Salvar status dos pedidos", type="primary", use_container_width=True):
+        save_loading_tracking(edited)
+        st.success("Status dos pedidos atualizado.")
+        st.rerun()
+
+    st.markdown("#### Mensagem consolidada para transporte")
+    transport_source = source[
+        (source["Status"] != "Pronto")
+        | (source["Enviado ao Transportador"] == False)
+    ].copy()
+    lines = []
+    for lote, lote_df in transport_source.groupby("Lote", sort=False):
+        lines.append(lote.upper())
+        for station, station_df in lote_df.groupby("Posto", sort=False):
+            lines.append("")
+            lines.append(station.upper())
+            for date_text, day_df in station_df.groupby("Data", sort=False):
+                lines.append(f"> {short_weekday(date_text)} - {date_text[:5]}")
+                for _, row in day_df.sort_values("Produto").iterrows():
+                    lines.append(f"{product_transport_code(row['Produto'])} {int(row['Comprar (L)'])}")
+        lines.append("")
+        lines.append("----------------")
+    st.text_area("Copiar para o transportador", "\n".join(lines).strip(), height=260)
 
 
 def render_market_page(read_only=False):
@@ -2805,6 +3085,8 @@ def main():
     page = render_sidebar()
     if page == "Painel de Compras":
         render_main_panel(read_only=False)
+    elif page == "Painel de Carregamentos":
+        render_loading_orders_page(read_only=False)
     elif page == "Medição de Estoque":
         render_measurement_page(read_only=False)
     elif page == "Programação Semanal":
