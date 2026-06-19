@@ -5,7 +5,6 @@ import math
 import os
 import re
 from datetime import datetime, timedelta
-from urllib.parse import quote, unquote
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -2353,6 +2352,72 @@ def loading_schedule_by_station(weekly_schedule, days_ahead=4):
     return sorted(cards, key=lambda item: (item["priority_rank"], -item["score"], item["station"]))
 
 
+def daily_loading_summary(weekly_schedule, days_ahead):
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=max(min(int(days_ahead), 7), 1) - 1)
+    rows = []
+    for offset in range((end - start).days + 1):
+        day = start + timedelta(days=offset)
+        rows.append(
+            {
+                "Data": day.strftime("%d/%m/%Y"),
+                "Dia": short_weekday(day.strftime("%d/%m/%Y")),
+                "Volume Total (L)": 0.0,
+                "Postos": 0,
+                "Produtos": 0,
+            }
+        )
+    if weekly_schedule.empty:
+        return pd.DataFrame(rows)
+    source = weekly_schedule.copy()
+    source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+    source = source[source["_DataFiltro"].dt.date.between(start, end)].copy()
+    for index, row in enumerate(rows):
+        day_df = source[source["Data"] == row["Data"]]
+        if not day_df.empty:
+            rows[index]["Volume Total (L)"] = float(day_df["Comprar (L)"].sum())
+            rows[index]["Postos"] = int(day_df["Posto"].nunique())
+            rows[index]["Produtos"] = int(len(day_df))
+    return pd.DataFrame(rows)
+
+
+def render_daily_loading_summary(summary_df):
+    if summary_df.empty:
+        return
+    st.markdown("#### Resumo por dia")
+    cols = st.columns(min(len(summary_df), 4))
+    for idx, (_, row) in enumerate(summary_df.iterrows()):
+        label = "Amanhã" if idx == 0 else row["Dia"]
+        cols[idx % len(cols)].metric(
+            f"{label} - {str(row['Data'])[:5]}",
+            liters(row["Volume Total (L)"]),
+            f"{int(row['Postos'])} posto(s)",
+        )
+    with st.expander("Detalhe por dia", expanded=False):
+        st.dataframe(
+            summary_df,
+            hide_index=True,
+            use_container_width=True,
+            column_config={
+                "Volume Total (L)": st.column_config.NumberColumn(
+                    "Volume Total (L)",
+                    help="Soma de todos os volumes sugeridos para carregar neste dia.",
+                    format="%.0f",
+                ),
+                "Postos": st.column_config.NumberColumn(
+                    "Postos",
+                    help="Quantidade de postos com carga programada neste dia.",
+                    format="%d",
+                ),
+                "Produtos": st.column_config.NumberColumn(
+                    "Produtos",
+                    help="Quantidade de linhas de produto programadas neste dia.",
+                    format="%d",
+                ),
+            },
+        )
+
+
 def render_tomorrow_loading_cards(cards, days_ahead=4):
     if not cards:
         st.info("Nenhum carregamento sugerido para amanhã com a programação atual.")
@@ -2374,9 +2439,8 @@ def render_tomorrow_loading_cards(cards, days_ahead=4):
                 f'<span>{liters(product["volume"])}</span>'
                 "</div>"
             )
-        station_param = quote(card["station"])
         html_cards.append(
-            f'<a class="tomorrow-card" href="?posto_programacao={station_param}" '
+            f'<div class="tomorrow-card" '
             f'style="background:{style["bg"]}; border-color:{style["border"]}; border-left:6px solid {style["accent"]};">'
             '<div class="tomorrow-card-top">'
             f'<div class="tomorrow-card-title">{html_lib.escape(card["station"])}</div>'
@@ -2390,20 +2454,24 @@ def render_tomorrow_loading_cards(cards, days_ahead=4):
             f'<span>{html_lib.escape(card["start_date"])} a {html_lib.escape(card["end_date"])}</span>'
             f'<strong>{liters(card["total_volume"])}</strong>'
             '</div>'
-            '</a>'
+            '</div>'
         )
     html_cards.append("</div>")
     st.markdown("".join(html_cards), unsafe_allow_html=True)
+    st.markdown("#### Abrir programação do posto")
+    cols = st.columns(min(len(cards), 3))
+    for idx, card in enumerate(cards):
+        if cols[idx % len(cols)].button(
+            card["station"],
+            key=f"open_station_plan_{idx}_{card['station']}",
+            use_container_width=True,
+        ):
+            st.session_state.selected_loading_station = card["station"]
+            st.rerun()
 
 
 def selected_station_from_query():
-    try:
-        value = st.query_params.get("posto_programacao")
-    except Exception:
-        value = None
-    if isinstance(value, list):
-        value = value[0] if value else None
-    return unquote(value) if value else None
+    return st.session_state.get("selected_loading_station")
 
 
 def render_station_week_plan(station, weekly_schedule):
@@ -2418,7 +2486,9 @@ def render_station_week_plan(station, weekly_schedule):
 
     st.markdown(f"#### Programação sugerida - {station}")
     st.caption("Simulação considerando que as sugestões do sistema serão aceitas para os próximos sete dias.")
-    st.markdown('<a class="stButton" href="?">Voltar para cards</a>', unsafe_allow_html=True)
+    if st.button("Voltar para cards", use_container_width=True):
+        st.session_state.selected_loading_station = None
+        st.rerun()
 
     if source.empty:
         st.info("Não há programação sugerida para este posto no período.")
@@ -2479,6 +2549,7 @@ def render_tomorrow_loading_page(read_only=False):
         format_func=lambda value: f"{value} dia(s) para frente",
         help="Escolha o horizonte da programação. O padrão mostra os próximos 4 dias a partir de amanhã.",
     )
+    render_daily_loading_summary(daily_loading_summary(weekly_schedule, days_ahead))
     cards = loading_schedule_by_station(weekly_schedule, days_ahead)
     render_tomorrow_loading_cards(cards, days_ahead)
 
