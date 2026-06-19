@@ -904,6 +904,73 @@ def save_decision_to_supabase(decision):
     return supabase_execute("save_decision", command, False)
 
 
+def load_operational_orders_from_supabase():
+    def query(client):
+        rows = client.table("operational_orders").select("*").execute().data or []
+        tracking = {}
+        for row in rows:
+            load_date = datetime.strptime(row["load_date"], "%Y-%m-%d").strftime("%d/%m/%Y")
+            key = row.get("order_key") or "|".join(
+                [
+                    load_date,
+                    row.get("station_name", ""),
+                    row.get("product_name", ""),
+                    str(int(float(row.get("volume_liters") or 0))),
+                ]
+            )
+            tracking[key] = {
+                "approved": bool(row.get("approved", False)),
+                "inserted_vibra": bool(row.get("inserted_vibra", False)),
+                "sent_transport": bool(row.get("sent_transport", False)),
+                "delivered": bool(row.get("delivered", False)),
+                "cancelled": bool(row.get("cancelled", False)),
+                "approved_by": row.get("approved_by"),
+                "approved_at": row.get("approved_at"),
+                "updated_by": row.get("updated_by"),
+                "notes": row.get("notes") or "",
+            }
+        return tracking
+
+    return supabase_execute("load_operational_orders", query, None)
+
+
+def save_operational_orders_to_supabase(tracking=None):
+    tracking = tracking if tracking is not None else st.session_state.get("loading_order_statuses", {})
+
+    def command(client):
+        rows = []
+        username = st.session_state.get("user", {}).get("username", "")
+        for key, status in tracking.items():
+            parsed = parse_order_tracking_key(key)
+            if not parsed:
+                continue
+            approved = bool(status.get("approved", False))
+            rows.append(
+                {
+                    "order_key": key,
+                    "load_date": parsed["date"].isoformat(),
+                    "station_name": parsed["station"],
+                    "product_name": parsed["product"],
+                    "volume_liters": float(parsed["volume"]),
+                    "approved": approved,
+                    "inserted_vibra": bool(status.get("inserted_vibra", False)),
+                    "sent_transport": bool(status.get("sent_transport", False)),
+                    "delivered": bool(status.get("delivered", False)),
+                    "cancelled": bool(status.get("cancelled", False)),
+                    "approved_by": status.get("approved_by") or (username if approved else None),
+                    "approved_at": status.get("approved_at") or (now_local().isoformat() if approved else None),
+                    "updated_by": username,
+                    "notes": status.get("notes", ""),
+                    "updated_at": now_local().isoformat(),
+                }
+            )
+        if rows:
+            client.table("operational_orders").upsert(rows, on_conflict="order_key").execute()
+        return True
+
+    return supabase_execute("save_operational_orders", command, False)
+
+
 def seed_supabase_if_empty():
     if not supabase_enabled() or st.session_state.get("supabase_seed_checked"):
         return
@@ -1098,6 +1165,9 @@ def init_state():
         db_users = load_users_from_supabase()
         if db_users:
             st.session_state.users = db_users
+        db_orders = load_operational_orders_from_supabase()
+        if db_orders is not None:
+            st.session_state.loading_order_statuses = db_orders
     elif st.session_state.get("data_version") != DATA_VERSION:
         st.session_state.network = default_network()
         st.session_state.data_version = DATA_VERSION
@@ -2217,10 +2287,24 @@ def active_future_orders_lookup(start=None, end=None):
                 "Aprovado": bool(status.get("approved", False)),
                 "Inserido na Vibra": bool(status.get("inserted_vibra", False)),
                 "Enviado ao Transportador": bool(status.get("sent_transport", False)),
+                "Aprovado por": status.get("approved_by") or "",
+                "Atualizado por": status.get("updated_by") or "",
             }
         )
     if not rows:
-        return {}, pd.DataFrame(columns=["Data", "Posto", "Produto", "Volume (L)", "Aprovado", "Inserido na Vibra", "Enviado ao Transportador"])
+        return {}, pd.DataFrame(
+            columns=[
+                "Data",
+                "Posto",
+                "Produto",
+                "Volume (L)",
+                "Aprovado",
+                "Inserido na Vibra",
+                "Enviado ao Transportador",
+                "Aprovado por",
+                "Atualizado por",
+            ]
+        )
 
     future_df = pd.DataFrame(rows).sort_values(["_Data", "Posto", "Produto"])
     lookup = {}
@@ -2351,13 +2435,20 @@ def save_loading_tracking(orders_df):
         key = row.get("Chave")
         if not key:
             continue
+        existing = tracking.get(key, {})
+        approved = bool(row.get("Aprovado", False))
         tracking[key] = {
-            "approved": bool(row.get("Aprovado", False)),
+            "approved": approved,
             "inserted_vibra": bool(row.get("Inserido na Vibra", False)),
             "sent_transport": bool(row.get("Enviado ao Transportador", False)),
             "delivered": bool(row.get("Entregue", False)),
             "cancelled": bool(row.get("Cancelado", False)),
+            "approved_by": existing.get("approved_by") or (st.session_state.get("user", {}).get("username", "") if approved else ""),
+            "approved_at": existing.get("approved_at") or (now_local().isoformat() if approved else None),
+            "updated_by": st.session_state.get("user", {}).get("username", ""),
+            "notes": existing.get("notes", ""),
         }
+    save_operational_orders_to_supabase(tracking)
 
 
 def approve_schedule_orders(schedule, days_ahead):
@@ -2375,12 +2466,17 @@ def approve_schedule_orders(schedule, days_ahead):
         status = tracking.setdefault(key, {})
         if status.get("delivered") or status.get("cancelled"):
             continue
+        if not status.get("approved"):
+            status["approved_by"] = st.session_state.get("user", {}).get("username", "")
+            status["approved_at"] = now_local().isoformat()
         status["approved"] = True
         status.setdefault("inserted_vibra", False)
         status.setdefault("sent_transport", False)
         status.setdefault("delivered", False)
         status.setdefault("cancelled", False)
+        status["updated_by"] = st.session_state.get("user", {}).get("username", "")
         approved_count += 1
+    save_operational_orders_to_supabase(tracking)
     return approved_count
 
 

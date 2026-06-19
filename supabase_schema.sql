@@ -103,6 +103,30 @@ create table if not exists public.delivery_schedule (
     updated_at timestamptz not null default now()
 );
 
+create table if not exists public.operational_orders (
+    id uuid primary key default gen_random_uuid(),
+    order_key text not null unique,
+    load_date date not null,
+    station_name text not null,
+    product_name text not null,
+    volume_liters numeric(12,2) not null default 0,
+    approved boolean not null default false,
+    inserted_vibra boolean not null default false,
+    sent_transport boolean not null default false,
+    delivered boolean not null default false,
+    cancelled boolean not null default false,
+    approved_by text,
+    approved_at timestamptz,
+    updated_by text,
+    notes text,
+    created_at timestamptz not null default now(),
+    updated_at timestamptz not null default now()
+);
+
+create index if not exists operational_orders_load_date_idx on public.operational_orders (load_date);
+create index if not exists operational_orders_station_product_idx on public.operational_orders (station_name, product_name);
+create index if not exists operational_orders_status_idx on public.operational_orders (approved, inserted_vibra, sent_transport, delivered, cancelled);
+
 create table if not exists public.decision_history (
     id uuid primary key default gen_random_uuid(),
     decided_at timestamptz not null default now(),
