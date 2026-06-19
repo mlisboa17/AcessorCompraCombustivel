@@ -2,3 +2,4 @@ outputs/
 work/
 __pycache__/
 .streamlit/secrets.toml
+.env

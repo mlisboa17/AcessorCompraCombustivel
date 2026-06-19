@@ -2,6 +2,7 @@ import hashlib
 import html as html_lib
 import io
 import math
+import os
 import re
 from datetime import datetime, timedelta
 
@@ -18,6 +19,19 @@ try:
     from pypdf import PdfReader
 except Exception:
     PdfReader = None
+
+try:
+    from dotenv import load_dotenv
+except Exception:
+    load_dotenv = None
+
+try:
+    from supabase import create_client
+except Exception:
+    create_client = None
+
+if load_dotenv is not None:
+    load_dotenv()
 
 
 st.set_page_config(
@@ -329,6 +343,37 @@ def hash_password(password):
 
 def default_users():
     return {username: payload.copy() for username, payload in USERS.items()}
+
+
+def get_config_value(key):
+    try:
+        value = st.secrets.get(key)
+        if value:
+            return value
+    except Exception:
+        pass
+    return os.getenv(key)
+
+
+def get_supabase_client():
+    url = get_config_value("SUPABASE_URL")
+    key = get_config_value("SUPABASE_ANON_KEY")
+    if not url or not key or create_client is None:
+        return None
+    try:
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def supabase_status():
+    if create_client is None:
+        return "Biblioteca Supabase não instalada"
+    if not get_config_value("SUPABASE_URL") or not get_config_value("SUPABASE_ANON_KEY"):
+        return "Modo memória: chaves Supabase não configuradas"
+    if get_supabase_client() is None:
+        return "Supabase configurado, mas conexão falhou"
+    return "Supabase conectado"
 
 
 def migrate_users():
@@ -1634,6 +1679,8 @@ def render_sidebar():
     st.sidebar.caption(f"{AVAILABLE_TRUCKS_PER_DAY} caminhões/dia")
     st.sidebar.caption(f"{liters(TRUCK_CAPACITY_LITERS)} por caminhão")
     st.sidebar.caption(f"Capacidade diária: {liters(DAILY_DELIVERY_CAPACITY_LITERS)}")
+    st.sidebar.divider()
+    st.sidebar.caption(f"Banco: {supabase_status()}")
 
     if st.sidebar.button("Sair", use_container_width=True):
         st.session_state.authenticated = False
@@ -2246,6 +2293,22 @@ def render_settings_sales():
         "⚙️ Configurações e Vendas",
         "Importe relatórios de vendas, recalcule VMD e consulte os acessos internos.",
     )
+
+    st.subheader("Banco de dados")
+    st.info(supabase_status(), icon="🗄️")
+    with st.expander("Como configurar Supabase", expanded=False):
+        st.markdown(
+            """
+            No Streamlit Cloud, configure em **Settings > Secrets**:
+
+            ```toml
+            SUPABASE_URL = "https://seu-projeto.supabase.co"
+            SUPABASE_ANON_KEY = "sua-chave-anon-public"
+            ```
+
+            Localmente, você pode usar um arquivo `.env` com as mesmas variáveis. O `.env` já está no `.gitignore`.
+            """
+        )
 
     st.subheader("Upload de relatórios")
     st.caption("Formato esperado: colunas `Posto`, `Produto`, `Litros` ou `Volume`, e opcionalmente `Data`.")
