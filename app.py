@@ -3710,8 +3710,8 @@ def render_analysis_hub(read_only=False):
 def ai_config_status():
     providers = [
         ("Groq", "GROQ_API_KEY"),
-        ("SiliconFlow", "SILICONFLOW_API_KEY"),
-        ("Qwen", "QWEN_API_KEY"),
+        ("Cerebras", "CEREBRAS_API_KEY"),
+        ("OpenRouter", "OPENROUTER_API_KEY"),
     ]
     rows = []
     for provider, key in providers:
@@ -3736,12 +3736,12 @@ def sync_ai_secrets_to_env():
         "GROQ_API_URL",
         "GROQ_API_KEY",
         "GROQ_MODEL",
-        "SILICONFLOW_API_URL",
-        "SILICONFLOW_API_KEY",
-        "SILICONFLOW_MODEL",
-        "QWEN_API_URL",
-        "QWEN_API_KEY",
-        "QWEN_MODEL",
+        "CEREBRAS_API_URL",
+        "CEREBRAS_API_KEY",
+        "CEREBRAS_MODEL",
+        "OPENROUTER_API_URL",
+        "OPENROUTER_API_KEY",
+        "OPENROUTER_MODEL",
     ]
     for key in keys:
         value = get_config_value(key)
@@ -3771,7 +3771,7 @@ def build_ai_business_context(exec_df, weekly_schedule, market):
 def render_ai_assistant_page(read_only=False):
     header(
         "Assistente IA",
-        "Análise executiva com fallback Groq, SiliconFlow e Qwen. Use para revisar riscos, compras e programação.",
+        "Análise executiva com fallback Groq, Cerebras e OpenRouter. Use para revisar riscos, compras e programação.",
     )
     if AIService is None or AIContext is None:
         st.error("Camada Python de IA não está disponível no ambiente.")

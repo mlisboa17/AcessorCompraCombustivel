@@ -79,13 +79,13 @@ class ProviderGroq(AIProvider):
         return content.strip()
 
 
-class ProviderSilicon(AIProvider):
-    name = "SiliconFlow"
+class ProviderCerebras(AIProvider):
+    name = "Cerebras"
 
     def generate_response(self, input_text: str, context: Optional[AIContext] = None) -> str:
-        api_url = _env("SILICONFLOW_API_URL", self.name)
-        api_key = _env("SILICONFLOW_API_KEY", self.name)
-        model = os.getenv("SILICONFLOW_MODEL", "deepseek-ai/DeepSeek-V3")
+        api_url = _env("CEREBRAS_API_URL", self.name)
+        api_key = _env("CEREBRAS_API_KEY", self.name)
+        model = os.getenv("CEREBRAS_MODEL", "llama3.1-8b")
         context = context or AIContext()
 
         data = _post_json(
@@ -101,17 +101,17 @@ class ProviderSilicon(AIProvider):
         )
         content = data.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
-            raise AIProviderError("Resposta invalida recebida da SiliconFlow.", self.name, retryable=False)
+            raise AIProviderError("Resposta invalida recebida da Cerebras.", self.name, retryable=False)
         return content.strip()
 
 
-class ProviderQwen(AIProvider):
-    name = "Qwen"
+class ProviderOpenRouter(AIProvider):
+    name = "OpenRouter"
 
     def generate_response(self, input_text: str, context: Optional[AIContext] = None) -> str:
-        api_url = _env("QWEN_API_URL", self.name)
-        api_key = _env("QWEN_API_KEY", self.name)
-        model = os.getenv("QWEN_MODEL", "qwen2.5-7b-instruct")
+        api_url = _env("OPENROUTER_API_URL", self.name)
+        api_key = _env("OPENROUTER_API_KEY", self.name)
+        model = os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.1-8b-instruct:free")
         context = context or AIContext()
 
         data = _post_json(
@@ -120,17 +120,12 @@ class ProviderQwen(AIProvider):
             api_key,
             {
                 "model": model,
-                "input": {"messages": build_messages(input_text, context)},
-                "parameters": {
-                    "temperature": context.temperature,
-                    "max_tokens": context.max_tokens,
-                },
+                "messages": build_messages(input_text, context),
+                "temperature": context.temperature,
+                "max_tokens": context.max_tokens,
             },
         )
-        output = data.get("output", {})
-        content = output.get("text")
-        if not content and output.get("choices"):
-            content = output.get("choices", [{}])[0].get("message", {}).get("content")
+        content = data.get("choices", [{}])[0].get("message", {}).get("content")
         if not isinstance(content, str) or not content.strip():
-            raise AIProviderError("Resposta invalida recebida do Qwen.", self.name, retryable=False)
+            raise AIProviderError("Resposta invalida recebida do OpenRouter.", self.name, retryable=False)
         return content.strip()

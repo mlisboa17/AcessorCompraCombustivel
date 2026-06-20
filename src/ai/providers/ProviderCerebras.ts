@@ -8,32 +8,24 @@ import {
   readRequiredEnv,
 } from "../types";
 
-export class ProviderQwen implements AIProvider {
-  public readonly name = "Qwen" as const;
+export class ProviderCerebras implements AIProvider {
+  public readonly name = "Cerebras" as const;
 
   async generateResponse(input: string, context?: AIContext): Promise<string> {
-    const apiUrl = readRequiredEnv("QWEN_API_URL", this.name);
-    const apiKey = readRequiredEnv("QWEN_API_KEY", this.name);
-    const model = process.env.QWEN_MODEL || "qwen2.5-7b-instruct";
+    const apiUrl = readRequiredEnv("CEREBRAS_API_URL", this.name);
+    const apiKey = readRequiredEnv("CEREBRAS_API_KEY", this.name);
+    const model = process.env.CEREBRAS_MODEL || "llama3.1-8b";
 
     const response = await this.postJson(apiUrl, apiKey, {
       model,
-      input: {
-        messages: buildMessages(input, context),
-      },
-      parameters: {
-        temperature: context?.temperature ?? 0.2,
-        max_tokens: context?.maxTokens ?? readOptionalNumberEnv("AI_MAX_TOKENS", 700),
-      },
+      messages: buildMessages(input, context),
+      temperature: context?.temperature ?? 0.2,
+      max_tokens: context?.maxTokens ?? readOptionalNumberEnv("AI_MAX_TOKENS", 700),
     });
 
-    const content =
-      response?.output?.text ||
-      response?.output?.choices?.[0]?.message?.content ||
-      response?.choices?.[0]?.message?.content;
-
+    const content = response?.choices?.[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new AIProviderError("Resposta invalida recebida do Qwen.", this.name, false);
+      throw new AIProviderError("Resposta invalida recebida da Cerebras.", this.name, false);
     }
 
     return content.trim();
@@ -50,7 +42,6 @@ export class ProviderQwen implements AIProvider {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
-          "X-DashScope-SSE": "disable",
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -58,7 +49,7 @@ export class ProviderQwen implements AIProvider {
 
       if (!response.ok) {
         throw new AIProviderError(
-          `Qwen falhou com HTTP ${response.status}.`,
+          `Cerebras falhou com HTTP ${response.status}.`,
           this.name,
           isRetryableStatus(response.status),
           response.status,
@@ -70,7 +61,7 @@ export class ProviderQwen implements AIProvider {
       if (error instanceof AIProviderError) throw error;
       const isTimeout = error instanceof Error && error.name === "AbortError";
       throw new AIProviderError(
-        isTimeout ? "Timeout ao chamar Qwen." : "Falha de rede ao chamar Qwen.",
+        isTimeout ? "Timeout ao chamar Cerebras." : "Falha de rede ao chamar Cerebras.",
         this.name,
         true,
       );

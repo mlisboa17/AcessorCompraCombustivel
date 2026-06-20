@@ -4,15 +4,15 @@ import os
 import time
 from typing import Optional
 
-from .providers import ProviderGroq, ProviderQwen, ProviderSilicon
+from .providers import ProviderCerebras, ProviderGroq, ProviderOpenRouter
 from .types import AIContext, AIProvider, AIProviderError, AI_FRIENDLY_ERROR
 
 
 class AIRouter:
     _providers: dict[str, AIProvider] = {
         "Groq": ProviderGroq(),
-        "SiliconFlow": ProviderSilicon(),
-        "Qwen": ProviderQwen(),
+        "Cerebras": ProviderCerebras(),
+        "OpenRouter": ProviderOpenRouter(),
     }
     _backoff_ms = [300, 600, 1000]
 
@@ -55,7 +55,7 @@ class AIRouter:
 
     @classmethod
     def _provider_order(cls) -> list[AIProvider]:
-        default_order = ["Groq", "SiliconFlow", "Qwen"]
+        default_order = ["Groq", "Cerebras", "OpenRouter"]
         env_order = [
             os.getenv("AI_PROVIDER_PRIMARY"),
             os.getenv("AI_PROVIDER_FALLBACK_1"),
@@ -73,10 +73,10 @@ class AIRouter:
         value = (name or "").strip().lower()
         if value == "groq":
             return "Groq"
-        if value in ("silicon", "siliconflow"):
-            return "SiliconFlow"
-        if value in ("qwen", "alibaba", "dashscope"):
-            return "Qwen"
+        if value == "cerebras":
+            return "Cerebras"
+        if value in ("openrouter", "open-router"):
+            return "OpenRouter"
         return None
 
     @staticmethod

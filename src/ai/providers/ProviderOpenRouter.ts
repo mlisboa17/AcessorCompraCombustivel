@@ -8,13 +8,13 @@ import {
   readRequiredEnv,
 } from "../types";
 
-export class ProviderSilicon implements AIProvider {
-  public readonly name = "SiliconFlow" as const;
+export class ProviderOpenRouter implements AIProvider {
+  public readonly name = "OpenRouter" as const;
 
   async generateResponse(input: string, context?: AIContext): Promise<string> {
-    const apiUrl = readRequiredEnv("SILICONFLOW_API_URL", this.name);
-    const apiKey = readRequiredEnv("SILICONFLOW_API_KEY", this.name);
-    const model = process.env.SILICONFLOW_MODEL || "deepseek-ai/DeepSeek-V3";
+    const apiUrl = readRequiredEnv("OPENROUTER_API_URL", this.name);
+    const apiKey = readRequiredEnv("OPENROUTER_API_KEY", this.name);
+    const model = process.env.OPENROUTER_MODEL || "meta-llama/llama-3.1-8b-instruct:free";
 
     const response = await this.postJson(apiUrl, apiKey, {
       model,
@@ -25,7 +25,7 @@ export class ProviderSilicon implements AIProvider {
 
     const content = response?.choices?.[0]?.message?.content;
     if (!content || typeof content !== "string") {
-      throw new AIProviderError("Resposta invalida recebida da SiliconFlow.", this.name, false);
+      throw new AIProviderError("Resposta invalida recebida do OpenRouter.", this.name, false);
     }
 
     return content.trim();
@@ -42,6 +42,8 @@ export class ProviderSilicon implements AIProvider {
         headers: {
           Authorization: `Bearer ${apiKey}`,
           "Content-Type": "application/json",
+          "HTTP-Referer": process.env.OPENROUTER_SITE_URL || "https://fuelguard360.streamlit.app",
+          "X-Title": process.env.OPENROUTER_APP_NAME || "FuelGuard360",
         },
         body: JSON.stringify(body),
         signal: controller.signal,
@@ -49,7 +51,7 @@ export class ProviderSilicon implements AIProvider {
 
       if (!response.ok) {
         throw new AIProviderError(
-          `SiliconFlow falhou com HTTP ${response.status}.`,
+          `OpenRouter falhou com HTTP ${response.status}.`,
           this.name,
           isRetryableStatus(response.status),
           response.status,
@@ -61,7 +63,7 @@ export class ProviderSilicon implements AIProvider {
       if (error instanceof AIProviderError) throw error;
       const isTimeout = error instanceof Error && error.name === "AbortError";
       throw new AIProviderError(
-        isTimeout ? "Timeout ao chamar SiliconFlow." : "Falha de rede ao chamar SiliconFlow.",
+        isTimeout ? "Timeout ao chamar OpenRouter." : "Falha de rede ao chamar OpenRouter.",
         this.name,
         true,
       );

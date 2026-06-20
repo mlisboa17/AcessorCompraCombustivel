@@ -1,4 +1,4 @@
-export type AIProviderName = "Groq" | "SiliconFlow" | "Qwen";
+export type AIProviderName = "Groq" | "Cerebras" | "OpenRouter";
 
 export interface AIProvider {
   name: AIProviderName;

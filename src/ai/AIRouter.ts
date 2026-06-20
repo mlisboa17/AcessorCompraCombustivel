@@ -1,6 +1,6 @@
 import { ProviderGroq } from "./providers/ProviderGroq";
-import { ProviderQwen } from "./providers/ProviderQwen";
-import { ProviderSilicon } from "./providers/ProviderSilicon";
+import { ProviderCerebras } from "./providers/ProviderCerebras";
+import { ProviderOpenRouter } from "./providers/ProviderOpenRouter";
 import {
   AIContext,
   AIProvider,
@@ -15,8 +15,8 @@ const BACKOFF_MS = [300, 600, 1000];
 export class AIRouter {
   private static readonly providers: Record<AIProviderName, AIProvider> = {
     Groq: new ProviderGroq(),
-    SiliconFlow: new ProviderSilicon(),
-    Qwen: new ProviderQwen(),
+    Cerebras: new ProviderCerebras(),
+    OpenRouter: new ProviderOpenRouter(),
   };
 
   static async handle(input: string, context?: AIContext): Promise<string> {
@@ -92,7 +92,7 @@ export class AIRouter {
       process.env.AI_PROVIDER_FALLBACK_1,
       process.env.AI_PROVIDER_FALLBACK_2,
     ];
-    const defaultOrder: AIProviderName[] = ["Groq", "SiliconFlow", "Qwen"];
+    const defaultOrder: AIProviderName[] = ["Groq", "Cerebras", "OpenRouter"];
     const selectedNames = envOrder
       .map((name, index) => this.normalizeProviderName(name) ?? defaultOrder[index])
       .filter((name): name is AIProviderName => Boolean(name));
@@ -105,8 +105,8 @@ export class AIRouter {
     const normalized = (name || "").trim().toLowerCase();
     if (!normalized) return null;
     if (normalized === "groq") return "Groq";
-    if (normalized === "silicon" || normalized === "siliconflow") return "SiliconFlow";
-    if (normalized === "qwen" || normalized === "alibaba" || normalized === "dashscope") return "Qwen";
+    if (normalized === "cerebras") return "Cerebras";
+    if (normalized === "openrouter" || normalized === "open-router") return "OpenRouter";
     return null;
   }
 
