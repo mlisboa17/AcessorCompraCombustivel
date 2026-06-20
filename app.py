@@ -3558,7 +3558,11 @@ def render_sidebar():
             "Cadastros": "Cadastros",
         }
     else:
-        page_labels = {"Carregamentos": "Carregar Amanhã", "Painel de Consulta": "Painel de Consulta"}
+        page_labels = {
+            "Carregamentos": "Carregar Amanhã",
+            "Estoque": "Medição de Estoque",
+            "Painel de Consulta": "Painel de Consulta",
+        }
     st.sidebar.markdown('<div class="sidebar-section-label">Navegação</div>', unsafe_allow_html=True)
     selected_label = st.sidebar.radio("Menu", list(page_labels.keys()), label_visibility="collapsed")
     st.session_state.compact_mode = st.sidebar.toggle(
@@ -3662,34 +3666,99 @@ def purchase_context(read_only=False):
 
 
 def render_stock_measurement(df, read_only=False):
-    st.subheader("Medição física do dia")
+    st.subheader("Lançamento rápido do estoque do dia")
     if read_only:
         st.caption("Perfil de consulta. Medições e compras são editadas pelo sócio.")
-    edit_df = df[["Posto", "Produto", "Estoque Atual (L)", "Qtd. Tanques", "Capacidade (L)", "VMD (L/dia)"]].copy()
-    edited = st.data_editor(
-        edit_df,
-        hide_index=True,
-        use_container_width=True,
-        disabled=read_only,
-        column_config={
-            "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
-            "Qtd. Tanques": st.column_config.NumberColumn(disabled=True, format="%d"),
-            "Capacidade (L)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-            "VMD (L/dia)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
-        },
+    if df.empty:
+        st.info("Nenhum posto/produto disponível para lançar estoque.")
+        return
+
+    station_options = sorted(df["Posto"].dropna().unique().tolist())
+    selected_station = st.selectbox(
+        "Posto",
+        station_options,
+        help="Selecione um posto para lançar apenas os produtos dele.",
     )
-    if not read_only and st.button("Salvar medições", type="primary"):
-        for _, row in edited.iterrows():
-            station = row["Posto"]
+    station_df = df[df["Posto"] == selected_station].sort_values("Produto").copy()
+    style = station_style(selected_station)
+    st.markdown(
+        f"""
+        <div class="station-band" style="border-color:{style["border"]}; border-left:5px solid {style["accent"]};">
+            <div class="section-kicker">Posto selecionado</div>
+            <b>{html_lib.escape(selected_station)}</b><br>
+            <span class="small-muted">{len(station_df)} produto(s) para atualizar</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    total_capacity = float(station_df["Capacidade (L)"].sum())
+    current_stock = float(station_df["Estoque Atual (L)"].sum())
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Estoque atual informado", liters(current_stock))
+    m2.metric("Capacidade do posto", liters(total_capacity))
+    m3.metric("Ocupação média", f"{(current_stock / total_capacity * 100) if total_capacity else 0:.0f}%")
+
+    with st.form(f"quick_stock_form_{selected_station}"):
+        st.caption("Digite a medição física atual de cada produto. O sistema limita automaticamente à capacidade cadastrada.")
+        values = {}
+        for _, row in station_df.iterrows():
             product = row["Produto"]
-            capacity = st.session_state.network[station]["tanks"][product]["capacity"]
-            st.session_state.network[station]["tanks"][product]["stock"] = min(
-                max(float(row["Estoque Atual (L)"]), 0), capacity
+            capacity = float(row["Capacidade (L)"])
+            stock = min(max(float(row["Estoque Atual (L)"]), 0), capacity)
+            autonomy = float(row["Dias de Autonomia"])
+            c1, c2 = st.columns([1.5, 1])
+            c1.markdown(
+                f"**{product}**  \n"
+                f"<span class='small-muted'>Capacidade: {liters(capacity)} · Autonomia atual: {autonomy:.1f} dia(s)</span>",
+                unsafe_allow_html=True,
             )
-        st.success("Medições atualizadas.")
+            values[product] = c2.number_input(
+                f"Estoque {product}",
+                min_value=0.0,
+                max_value=capacity,
+                value=stock,
+                step=500.0,
+                format="%.0f",
+                label_visibility="collapsed",
+                disabled=read_only,
+                key=f"quick_stock_{selected_station}_{product}",
+            )
+        submitted = st.form_submit_button("Salvar estoque deste posto", type="primary", use_container_width=True, disabled=read_only)
+
+    if submitted:
+        for product, value in values.items():
+            capacity = float(st.session_state.network[selected_station]["tanks"][product]["capacity"])
+            st.session_state.network[selected_station]["tanks"][product]["stock"] = min(max(float(value), 0), capacity)
         save_network_to_supabase(st.session_state.network)
+        st.success(f"Estoque de {selected_station} atualizado.")
         st.rerun()
 
+    with st.expander("Edição avançada dos produtos exibidos", expanded=False):
+        edit_df = df[["Posto", "Produto", "Estoque Atual (L)", "Qtd. Tanques", "Capacidade (L)", "VMD (L/dia)"]].copy()
+        edited = st.data_editor(
+            edit_df,
+            hide_index=True,
+            use_container_width=True,
+            disabled=read_only,
+            column_config={
+                "Estoque Atual (L)": st.column_config.NumberColumn(min_value=0, step=100, format="%.0f"),
+                "Qtd. Tanques": st.column_config.NumberColumn(disabled=True, format="%d"),
+                "Capacidade (L)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+                "VMD (L/dia)": st.column_config.NumberColumn(disabled=True, format="%.0f"),
+            },
+        )
+        if not read_only and st.button("Salvar edição avançada", type="secondary"):
+            for _, row in edited.iterrows():
+                station = row["Posto"]
+                product = row["Produto"]
+                capacity = st.session_state.network[station]["tanks"][product]["capacity"]
+                st.session_state.network[station]["tanks"][product]["stock"] = min(
+                    max(float(row["Estoque Atual (L)"]), 0), capacity
+                )
+            st.success("Medições atualizadas.")
+            save_network_to_supabase(st.session_state.network)
+            st.rerun()
 
 def render_weekly_programming(weekly_schedule, base_calendar):
     st.subheader("Programação semanal de recebimento")
@@ -3801,7 +3870,8 @@ def render_main_panel(read_only=False):
 
 def render_measurement_page(read_only=False):
     header("Medição de Estoque", "Atualize a litragem atual por posto e produto.")
-    df, _, _, _, _, _ = purchase_context(read_only)
+    station_filter = allowed_station() if st.session_state.user["role"] == "Gerente" else None
+    df = network_records(station_filter)
     render_stock_measurement(df, read_only)
 
 
