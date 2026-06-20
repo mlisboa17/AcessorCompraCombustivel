@@ -31,6 +31,13 @@ try:
 except Exception:
     create_client = None
 
+try:
+    from src.ai_py import AIService
+    from src.ai_py.types import AIContext
+except Exception:
+    AIService = None
+    AIContext = None
+
 if load_dotenv is not None:
     load_dotenv()
 
@@ -3199,6 +3206,7 @@ def render_sidebar():
             "Estoque": "Medição de Estoque",
             "Programação": "Programação Operacional",
             "Análises": "Análises",
+            "Assistente IA": "Assistente IA",
             "Cadastros": "Cadastros",
         }
     else:
@@ -3697,6 +3705,115 @@ def render_analysis_hub(read_only=False):
         render_market_page(read_only=read_only)
     with tab_finance:
         render_finance_page(read_only=read_only)
+
+
+def ai_config_status():
+    providers = [
+        ("Groq", "GROQ_API_KEY"),
+        ("SiliconFlow", "SILICONFLOW_API_KEY"),
+        ("Qwen", "QWEN_API_KEY"),
+    ]
+    rows = []
+    for provider, key in providers:
+        rows.append(
+            {
+                "Provedor": provider,
+                "Chave configurada": "Sim" if get_config_value(key) else "Não",
+                "Variável": key,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def sync_ai_secrets_to_env():
+    keys = [
+        "AI_PROVIDER_PRIMARY",
+        "AI_PROVIDER_FALLBACK_1",
+        "AI_PROVIDER_FALLBACK_2",
+        "AI_PROVIDER_TIMEOUT_MS",
+        "AI_PROVIDER_MAX_ATTEMPTS",
+        "AI_MAX_TOKENS",
+        "GROQ_API_URL",
+        "GROQ_API_KEY",
+        "GROQ_MODEL",
+        "SILICONFLOW_API_URL",
+        "SILICONFLOW_API_KEY",
+        "SILICONFLOW_MODEL",
+        "QWEN_API_URL",
+        "QWEN_API_KEY",
+        "QWEN_MODEL",
+    ]
+    for key in keys:
+        value = get_config_value(key)
+        if value:
+            os.environ[key] = str(value)
+
+
+def build_ai_business_context(exec_df, weekly_schedule, market):
+    top_risks = exec_df.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(12)
+    schedule_preview = weekly_schedule.sort_values(["Data", "Posto", "Produto"]).head(20) if not weekly_schedule.empty else pd.DataFrame()
+    return {
+        "mercado": {
+            "tendencia": market.get("trend_label", market.get("trend", "Estável")),
+            "fonte": market.get("source", ""),
+            "usd": market.get("usd"),
+            "brent": market.get("brent"),
+        },
+        "riscos": top_risks[
+            ["Posto", "Produto", "Estoque Atual", "Consumo Diário", "Cobertura (dias)", "Score", "Motivo", "Comprar?", "Volume"]
+        ].to_dict("records") if not top_risks.empty else [],
+        "programacao": schedule_preview[
+            ["Data", "Posto", "Produto", "Comprar (L)", "Motivo", "Observação"]
+        ].to_dict("records") if not schedule_preview.empty else [],
+    }
+
+
+def render_ai_assistant_page(read_only=False):
+    header(
+        "Assistente IA",
+        "Análise executiva com fallback Groq, SiliconFlow e Qwen. Use para revisar riscos, compras e programação.",
+    )
+    if AIService is None or AIContext is None:
+        st.error("Camada Python de IA não está disponível no ambiente.")
+        return
+
+    status_df = ai_config_status()
+    configured_count = int((status_df["Chave configurada"] == "Sim").sum())
+    c1, c2 = st.columns([1, 2])
+    c1.metric("Provedores configurados", configured_count, "mínimo recomendado: 1")
+    c2.dataframe(status_df, hide_index=True, use_container_width=True)
+
+    if configured_count == 0:
+        st.warning("Configure pelo menos a GROQ_API_KEY nos Secrets do Streamlit para ativar o assistente.")
+        return
+
+    df, market, _, exec_df, weekly_schedule, _ = purchase_context(read_only)
+    question = st.text_area(
+        "Pergunta para a IA",
+        value="Analise a programação dos próximos dias e diga quais compras devo priorizar, explicando risco de falta, alta de preço e prazo financeiro.",
+        height=120,
+    )
+    if st.button("Gerar análise com IA", type="primary", use_container_width=True):
+        sync_ai_secrets_to_env()
+        context_payload = build_ai_business_context(exec_df, weekly_schedule, market)
+        system_prompt = (
+            "Você é um analista sênior de suprimento de combustíveis para rede de postos em Pernambuco. "
+            "Responda em português do Brasil, de forma objetiva, priorizando: 1) não faltar produto, "
+            "2) aproveitar/evitar alta de preço, 3) otimizar prazo financeiro e boleto. "
+            "Use os dados do contexto, não invente volumes fora da programação."
+        )
+        ai_context = AIContext(
+            system_prompt=system_prompt,
+            user_id=st.session_state.user.get("username", ""),
+            metadata=context_payload,
+            temperature=0.2,
+            max_tokens=900,
+        )
+        prompt = f"Pergunta do usuário: {question}\n\nContexto operacional:\n{context_payload}"
+        with st.spinner("Consultando IA com fallback automático..."):
+            answer = AIService().generate(prompt, ai_context)
+        st.markdown("#### Resposta da IA")
+        st.write(answer)
 
 
 def render_admin_hub():
@@ -4212,6 +4329,8 @@ def main():
         render_programming_hub(read_only=False)
     elif page == "Análises":
         render_analysis_hub(read_only=False)
+    elif page == "Assistente IA":
+        render_ai_assistant_page(read_only=False)
     elif page == "Cadastros":
         render_admin_hub()
     else:
