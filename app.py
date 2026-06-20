@@ -552,6 +552,70 @@ def inject_css():
                 font-size: .88rem;
             }
 
+            .transport-week-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+                gap: 12px;
+                margin: 12px 0 18px 0;
+            }
+
+            .transport-day-card {
+                border: 1px solid var(--line);
+                background: rgba(15, 23, 42, .88);
+                border-radius: 8px;
+                padding: 12px;
+            }
+
+            .transport-day-head {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                gap: 8px;
+                border-bottom: 1px solid rgba(148, 163, 184, .16);
+                padding-bottom: 8px;
+                margin-bottom: 8px;
+            }
+
+            .transport-day-title {
+                font-weight: 850;
+                color: #f8fafc;
+                line-height: 1.15;
+            }
+
+            .transport-day-total {
+                font-weight: 850;
+                color: var(--green);
+                white-space: nowrap;
+            }
+
+            .transport-station-block {
+                border-radius: 8px;
+                border: 1px solid rgba(148, 163, 184, .18);
+                padding: 9px;
+                margin-top: 8px;
+            }
+
+            .transport-station-name {
+                font-weight: 800;
+                margin-bottom: 6px;
+                color: #f8fafc;
+            }
+
+            .transport-line {
+                display: flex;
+                justify-content: space-between;
+                gap: 10px;
+                font-size: .9rem;
+                color: #d1d5db;
+                padding: 3px 0;
+            }
+
+            .transport-empty {
+                color: var(--muted);
+                font-size: .9rem;
+                padding: 8px 0;
+            }
+
             @media (max-width: 640px) {
                 .block-container {
                     padding-left: .55rem;
@@ -2920,6 +2984,112 @@ def render_daily_loading_summary(summary_df):
         )
 
 
+def build_transport_week_agenda(weekly_schedule, days_ahead=7):
+    days_ahead = max(min(int(days_ahead), 7), 1)
+    start = now_local().date() + timedelta(days=1)
+    end = start + timedelta(days=days_ahead - 1)
+    period_days = [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+    source = weekly_schedule.copy()
+    if not source.empty:
+        source["_DataFiltro"] = pd.to_datetime(source["Data"], format="%d/%m/%Y", errors="coerce")
+        source = source[source["_DataFiltro"].dt.date.between(start, end)].copy()
+
+    agenda = []
+    for day in period_days:
+        date_text = day.strftime("%d/%m/%Y")
+        day_df = source[source["_DataFiltro"].dt.date == day].copy() if not source.empty else pd.DataFrame()
+        stations = []
+        total_volume = 0.0
+        if not day_df.empty:
+            for station, station_df in day_df.sort_values(["Posto", "Produto"]).groupby("Posto", sort=False):
+                products = []
+                station_total = 0.0
+                for _, row in station_df.iterrows():
+                    volume = float(row["Comprar (L)"])
+                    station_total += volume
+                    total_volume += volume
+                    products.append(
+                        {
+                            "product": row["Produto"],
+                            "code": product_transport_code(row["Produto"]),
+                            "volume": volume,
+                            "reason": row.get("Motivo", ""),
+                        }
+                    )
+                stations.append({"station": station, "total": station_total, "products": products})
+        agenda.append(
+            {
+                "date": date_text,
+                "weekday": short_weekday(date_text),
+                "total": total_volume,
+                "stations": stations,
+                "operates": day.weekday() != 6,
+            }
+        )
+    return agenda
+
+
+def transport_week_message(agenda):
+    lines = ["PROGRAMAÇÃO SUGERIDA - PRÓXIMOS 7 DIAS", ""]
+    for day in agenda:
+        lines.append(f"> {day['weekday']} - {day['date'][:5]}")
+        if not day["operates"]:
+            lines.append("DOMINGO - SEM CARREGAMENTO")
+        elif not day["stations"]:
+            lines.append("Sem carga")
+        else:
+            for station in day["stations"]:
+                lines.append(station["station"].upper())
+                for product in station["products"]:
+                    lines.append(f"{product['code']} {int(product['volume'])}")
+        lines.append("")
+        lines.append("----------------")
+    return "\n".join(lines).strip()
+
+
+def render_transport_week_agenda(weekly_schedule, days_ahead=7):
+    agenda = build_transport_week_agenda(weekly_schedule, days_ahead)
+    total_volume = sum(day["total"] for day in agenda)
+    total_stations = len({station["station"] for day in agenda for station in day["stations"]})
+    a1, a2, a3 = st.columns(3)
+    a1.metric("Volume 7 dias", liters(total_volume))
+    a2.metric("Postos com carga", total_stations)
+    a3.metric("Dias com carga", sum(1 for day in agenda if day["total"] > 0))
+
+    html_parts = ['<div class="transport-week-grid">']
+    for day in agenda:
+        html_parts.append('<div class="transport-day-card">')
+        html_parts.append(
+            '<div class="transport-day-head">'
+            f'<div class="transport-day-title">{html_lib.escape(day["weekday"])}<br>{html_lib.escape(day["date"][:5])}</div>'
+            f'<div class="transport-day-total">{liters(day["total"])}</div>'
+            '</div>'
+        )
+        if not day["operates"]:
+            html_parts.append('<div class="transport-empty">Domingo - sem carregamento</div>')
+        elif not day["stations"]:
+            html_parts.append('<div class="transport-empty">Sem carga programada</div>')
+        else:
+            for station in day["stations"]:
+                style = station_style(station["station"])
+                html_parts.append(
+                    f'<div class="transport-station-block" style="background:{style["bg"]}; border-color:{style["border"]}; border-left:5px solid {style["accent"]};">'
+                    f'<div class="transport-station-name">{html_lib.escape(station["station"])}</div>'
+                )
+                for product in station["products"]:
+                    html_parts.append(
+                        '<div class="transport-line">'
+                        f'<span>{html_lib.escape(product["code"])}</span>'
+                        f'<strong>{liters(product["volume"])}</strong>'
+                        '</div>'
+                    )
+                html_parts.append("</div>")
+        html_parts.append("</div>")
+    html_parts.append("</div>")
+    st.markdown("".join(html_parts), unsafe_allow_html=True)
+    st.text_area("Mensagem pronta para transporte/compra", transport_week_message(agenda), height=300)
+
+
 def render_tomorrow_loading_cards(cards, days_ahead=4):
     if not cards:
         st.info("Nenhum carregamento sugerido para amanhã com a programação atual.")
@@ -3088,6 +3258,8 @@ def render_tomorrow_loading_page(read_only=False):
         render_station_week_plan(selected_station, projected_schedule)
         return
 
+    st.markdown("#### Agenda para transportar/comprar")
+    render_transport_week_agenda(projected_schedule, 7)
     action_cols = st.columns([1, 1])
     if action_cols[0].button(
         "Aprovar sugestões exibidas",
