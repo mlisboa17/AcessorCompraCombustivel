@@ -3756,6 +3756,13 @@ def build_ai_business_context(exec_df, weekly_schedule, market):
         "mercado": {
             "tendencia": market.get("trend_label", market.get("trend", "Estável")),
             "fonte": market.get("source", ""),
+            "fontes_regionais_recomendadas": [
+                "ANP - preço médio semanal por município/estado",
+                "Petrobras - comunicados de reajuste",
+                "Vibra/Suape - tabela comercial e disponibilidade local",
+                "Brent e dólar - indicadores macro já usados no sistema",
+                "Notícias econômicas regionais e nacionais",
+            ],
             "usd": market.get("usd"),
             "brent": market.get("brent"),
         },
@@ -3766,6 +3773,30 @@ def build_ai_business_context(exec_df, weekly_schedule, market):
             ["Data", "Posto", "Produto", "Comprar (L)", "Motivo", "Observação"]
         ].to_dict("records") if not schedule_preview.empty else [],
     }
+
+
+AI_ASSISTANT_PROMPTS = {
+    "Prioridade de compra": (
+        "Analise a programação dos próximos dias e diga quais compras devo priorizar. "
+        "Explique risco de falta, alta de preço, prazo financeiro e cargas já em trânsito."
+    ),
+    "Tendência regional PE/Suape": (
+        "Faça uma análise de tendência de preço para Pernambuco/Suape usando os indicadores disponíveis "
+        "no sistema e indique quais fontes externas devo conferir antes de bater o martelo. "
+        "Separe o que é dado confirmado do sistema e o que depende de consulta externa como ANP, Petrobras, Vibra/Suape e notícias."
+    ),
+    "Mensagem para transporte": (
+        "Gere uma mensagem objetiva para enviar ao transportador com os carregamentos programados, "
+        "agrupando por data, posto, produto e volume."
+    ),
+    "Risco de falta": (
+        "Liste os maiores riscos de falta por posto e produto, explicando cobertura em dias, consumo diário e ação recomendada."
+    ),
+    "Preço x boleto": (
+        "Compare oportunidade de preço com prazo financeiro. Diga quando a alta de preço deve pesar mais que boleto "
+        "e quando vale adiar para ganhar vencimento em fim de semana."
+    ),
+}
 
 
 def render_ai_assistant_page(read_only=False):
@@ -3788,10 +3819,20 @@ def render_ai_assistant_page(read_only=False):
         return
 
     df, market, _, exec_df, weekly_schedule, _ = purchase_context(read_only)
+    st.markdown("#### Atalhos inteligentes")
+    selected_prompt = st.selectbox(
+        "Tipo de análise",
+        list(AI_ASSISTANT_PROMPTS.keys()),
+        help="Escolha um roteiro pronto. Você pode editar o texto antes de enviar.",
+    )
     question = st.text_area(
         "Pergunta para a IA",
-        value="Analise a programação dos próximos dias e diga quais compras devo priorizar, explicando risco de falta, alta de preço e prazo financeiro.",
+        value=AI_ASSISTANT_PROMPTS[selected_prompt],
         height=120,
+    )
+    st.caption(
+        "Para tendência regional, a IA usa os dados internos e indica fontes externas a confirmar. "
+        "Integrações automáticas com ANP/Petrobras/Vibra podem ser adicionadas depois como conectores de dados."
     )
     if st.button("Gerar análise com IA", type="primary", use_container_width=True):
         sync_ai_secrets_to_env()
@@ -3800,7 +3841,8 @@ def render_ai_assistant_page(read_only=False):
             "Você é um analista sênior de suprimento de combustíveis para rede de postos em Pernambuco. "
             "Responda em português do Brasil, de forma objetiva, priorizando: 1) não faltar produto, "
             "2) aproveitar/evitar alta de preço, 3) otimizar prazo financeiro e boleto. "
-            "Use os dados do contexto, não invente volumes fora da programação."
+            "Use os dados do contexto, não invente volumes fora da programação. "
+            "Quando o usuário pedir tendência regional de preço, diferencie claramente dado interno, inferência e fonte externa a consultar."
         )
         ai_context = AIContext(
             system_prompt=system_prompt,
