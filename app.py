@@ -1262,6 +1262,21 @@ def init_state():
 
 def login_screen():
     inject_css()
+    auto_login_username = str(get_config_value("AUTO_LOGIN_USERNAME") or "").strip()
+    if auto_login_username and auto_login_username in st.session_state.users:
+        user = st.session_state.users[auto_login_username]
+        if user.get("active", True):
+            st.session_state.authenticated = True
+            st.session_state.user = current_user_payload(auto_login_username)
+            st.rerun()
+
+    try:
+        remembered_username = st.query_params.get("user", "")
+    except Exception:
+        remembered_username = ""
+    if remembered_username not in st.session_state.users:
+        remembered_username = ""
+
     left, mid, right = st.columns([1.2, 1, 1.2])
     with mid:
         st.markdown('<div class="top-title">', unsafe_allow_html=True)
@@ -1270,9 +1285,13 @@ def login_screen():
             '<p class="subtitle">Painel corporativo para decisão de compras, estoque e autonomia da rede.</p>',
             unsafe_allow_html=True,
         )
+        users = sorted(st.session_state.users.keys())
+        default_index = users.index(remembered_username) if remembered_username in users else 0
+        st.caption("Escolha o usuário e use a senha salva do navegador para entrar mais rápido.")
         with st.form("login_form"):
-            username = st.text_input("Usuário", placeholder="socio")
-            password = st.text_input("Senha", type="password", placeholder="suape2026")
+            username = st.selectbox("Usuário", users, index=default_index)
+            password = st.text_input("Senha", type="password")
+            remember_user = st.checkbox("Lembrar este usuário neste aparelho", value=True)
             submitted = st.form_submit_button("Entrar no painel", use_container_width=True)
 
         if submitted:
@@ -1281,12 +1300,16 @@ def login_screen():
             if user and user.get("active", True) and user["password_hash"] == hash_password(password):
                 st.session_state.authenticated = True
                 st.session_state.user = current_user_payload(clean_username)
+                if remember_user:
+                    try:
+                        st.query_params["user"] = clean_username
+                    except Exception:
+                        pass
                 st.rerun()
             elif user and not user.get("active", True):
                 st.error("Usuário inativo. Procure o administrador.")
             else:
                 st.error("Usuário ou senha inválidos.")
-
 
 def network_records(station_filter=None):
     rows = []
