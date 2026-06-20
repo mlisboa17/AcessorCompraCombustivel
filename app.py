@@ -4,6 +4,9 @@ import io
 import math
 import os
 import re
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -54,6 +57,7 @@ TRUCK_CAPACITY_LITERS = 25000
 AVAILABLE_TRUCKS_PER_DAY = 2
 DAILY_DELIVERY_CAPACITY_LITERS = TRUCK_CAPACITY_LITERS * AVAILABLE_TRUCKS_PER_DAY
 MARKET_REFRESH_HOURS = 3
+DAILY_TREND_REFRESH_HOURS = 24
 APP_TIMEZONE = ZoneInfo("America/Sao_Paulo")
 VIBRA_STANDARD_ORDER_DEADLINE_HOUR = 16
 VIBRA_STANDARD_CHANGE_DEADLINE_HOUR = 14
@@ -1181,6 +1185,8 @@ def init_state():
     st.session_state.setdefault("network", default_network())
     st.session_state.setdefault("market_cache", None)
     st.session_state.setdefault("last_market_update", None)
+    st.session_state.setdefault("daily_trend_cache", None)
+    st.session_state.setdefault("daily_trend_update_dt", None)
     st.session_state.setdefault("sales_trends", {})
     st.session_state.setdefault("decision_history", [])
     st.session_state.setdefault("manual_schedule_items", [])
@@ -1309,6 +1315,94 @@ def get_market_data(force=False):
         st.session_state.last_market_update_dt = now_local()
         st.session_state.last_market_update = now_local().strftime("%d/%m/%Y %H:%M")
     return st.session_state.market_cache
+
+
+def fetch_google_news_rss(query, limit=4):
+    encoded_query = urllib.parse.quote_plus(query)
+    url = f"https://news.google.com/rss/search?q={encoded_query}&hl=pt-BR&gl=BR&ceid=BR:pt-419"
+    request = urllib.request.Request(url, headers={"User-Agent": "FuelGuard360/1.0"})
+    with urllib.request.urlopen(request, timeout=8) as response:
+        xml_data = response.read()
+    root = ET.fromstring(xml_data)
+    rows = []
+    for item in root.findall(".//item")[:limit]:
+        title = item.findtext("title") or ""
+        link = item.findtext("link") or ""
+        pub_date = item.findtext("pubDate") or ""
+        rows.append({"titulo": title, "link": link, "publicado": pub_date})
+    return rows
+
+
+def classify_daily_news_trend(news_items, market):
+    text = " ".join(item.get("titulo", "").lower() for item in news_items)
+    up_terms = ["alta", "aumento", "reajuste", "subir", "sobe", "pressão", "defasagem", "brent sobe", "dólar sobe"]
+    down_terms = ["queda", "redução", "corte", "baixar", "baixa", "recua", "brent cai", "dólar cai"]
+    up_score = sum(text.count(term) for term in up_terms)
+    down_score = sum(text.count(term) for term in down_terms)
+    brent_delta = float(market.get("brent_delta", 0) or 0)
+    usd_delta = float(market.get("usd_delta", 0) or 0)
+    macro_score = (brent_delta + usd_delta) / 2
+    if macro_score >= 0.35:
+        up_score += 1
+    elif macro_score <= -0.35:
+        down_score += 1
+    if up_score > down_score:
+        return "ALTA"
+    if down_score > up_score:
+        return "BAIXA"
+    return "NEUTRA"
+
+
+def fetch_daily_trend_research():
+    market = get_market_data()
+    queries = [
+        "Petrobras reajuste combustíveis gasolina diesel hoje",
+        "ANP preço combustíveis Pernambuco Recife gasolina diesel etanol",
+        "Vibra Suape combustíveis Pernambuco preço distribuição",
+        "Brent dólar combustíveis Brasil hoje",
+    ]
+    news_items = []
+    errors = []
+    for query in queries:
+        try:
+            for item in fetch_google_news_rss(query, limit=3):
+                item["consulta"] = query
+                news_items.append(item)
+        except Exception as exc:
+            errors.append(f"{query}: {exc}")
+    seen = set()
+    unique_news = []
+    for item in news_items:
+        key = item.get("titulo", "")
+        if key and key not in seen:
+            unique_news.append(item)
+            seen.add(key)
+    unique_news = unique_news[:10]
+    trend = classify_daily_news_trend(unique_news, market)
+    return {
+        "updated_at": now_local(),
+        "trend": trend,
+        "trend_label": {"ALTA": "Alta", "BAIXA": "Queda", "NEUTRA": "Estável"}[trend],
+        "market": market,
+        "news": unique_news,
+        "errors": errors[:3],
+        "source": "Google News RSS + Brent/Dólar via yfinance",
+        "summary": (
+            "Radar diário regional com busca por Petrobras, ANP, Pernambuco/Suape, Brent e dólar. "
+            "Use como sinal auxiliar; decisão final segue estoque, risco de falta e tabela comercial."
+        ),
+    }
+
+
+def get_daily_trend_research(force=False):
+    last_update = st.session_state.get("daily_trend_update_dt")
+    expired = True
+    if last_update:
+        expired = now_local() - last_update >= timedelta(hours=DAILY_TREND_REFRESH_HOURS)
+    if force or expired or st.session_state.get("daily_trend_cache") is None:
+        st.session_state.daily_trend_cache = fetch_daily_trend_research()
+        st.session_state.daily_trend_update_dt = st.session_state.daily_trend_cache["updated_at"]
+    return st.session_state.daily_trend_cache
 
 
 def consumption_trend_for(row):
@@ -3666,6 +3760,29 @@ def render_market_page(read_only=False):
         f"Atualização automática a cada {MARKET_REFRESH_HOURS}h"
     )
     st.caption(market.get("source_detail", ""))
+    daily_research = get_daily_trend_research()
+    with st.expander("Pesquisa diária de tendência regional", expanded=True):
+        r1, r2, r3 = st.columns([1, 1, 1.3])
+        r1.metric("Sinal diário", daily_research.get("trend_label", "Estável"))
+        updated_at = daily_research.get("updated_at")
+        r2.metric(
+            "Atualizado",
+            updated_at.strftime("%d/%m %H:%M") if isinstance(updated_at, datetime) else "-",
+            "1x ao dia",
+        )
+        if r3.button("Atualizar pesquisa diária agora", use_container_width=True):
+            with st.spinner("Pesquisando tendências regionais..."):
+                get_daily_trend_research(force=True)
+            st.rerun()
+        st.caption(daily_research.get("summary", ""))
+        news = daily_research.get("news", [])
+        if news:
+            news_df = pd.DataFrame(news)[["consulta", "titulo", "publicado", "link"]]
+            st.dataframe(news_df, hide_index=True, use_container_width=True)
+        else:
+            st.info("Nenhuma manchete coletada agora. O app seguirá usando Brent e dólar como sinal macro.")
+        if daily_research.get("errors"):
+            st.caption("Algumas fontes não responderam: " + " | ".join(daily_research["errors"]))
     render_market_radar(market)
     with st.expander("Ocupação física dos tanques", expanded=False):
         for station in df["Posto"].drop_duplicates().tolist():
@@ -3752,6 +3869,7 @@ def sync_ai_secrets_to_env():
 def build_ai_business_context(exec_df, weekly_schedule, market):
     top_risks = exec_df.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(12)
     schedule_preview = weekly_schedule.sort_values(["Data", "Posto", "Produto"]).head(20) if not weekly_schedule.empty else pd.DataFrame()
+    daily_research = get_daily_trend_research()
     return {
         "mercado": {
             "tendencia": market.get("trend_label", market.get("trend", "Estável")),
@@ -3765,6 +3883,13 @@ def build_ai_business_context(exec_df, weekly_schedule, market):
             ],
             "usd": market.get("usd"),
             "brent": market.get("brent"),
+        },
+        "pesquisa_diaria_tendencia": {
+            "sinal": daily_research.get("trend_label", "Estável"),
+            "fonte": daily_research.get("source", ""),
+            "resumo": daily_research.get("summary", ""),
+            "noticias": daily_research.get("news", [])[:8],
+            "observacao": "Pesquisa automática diária. Use como sinal auxiliar, não como ordem final de compra.",
         },
         "riscos": top_risks[
             ["Posto", "Produto", "Estoque Atual", "Consumo Diário", "Cobertura (dias)", "Score", "Motivo", "Comprar?", "Volume"]
@@ -3781,9 +3906,9 @@ AI_ASSISTANT_PROMPTS = {
         "Explique risco de falta, alta de preço, prazo financeiro e cargas já em trânsito."
     ),
     "Tendência regional PE/Suape": (
-        "Faça uma análise de tendência de preço para Pernambuco/Suape usando os indicadores disponíveis "
-        "no sistema e indique quais fontes externas devo conferir antes de bater o martelo. "
-        "Separe o que é dado confirmado do sistema e o que depende de consulta externa como ANP, Petrobras, Vibra/Suape e notícias."
+        "Faça uma análise de tendência de preço para Pernambuco/Suape usando a pesquisa diária automática, "
+        "Brent, dólar e os indicadores disponíveis no sistema. Separe dado confirmado, inferência e pontos que ainda "
+        "dependem de confirmar em ANP, Petrobras ou tabela Vibra/Suape."
     ),
     "Mensagem para transporte": (
         "Gere uma mensagem objetiva para enviar ao transportador com os carregamentos programados, "
