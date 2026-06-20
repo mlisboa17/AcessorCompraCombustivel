@@ -94,6 +94,8 @@ PURCHASE_COLUMN_HELP = {
     "Dias de Autonomia": "Quantidade estimada de dias até o estoque acabar.",
     "Tendência Consumo": "Direção recente do consumo: alta, queda ou estabilidade.",
     "Tendência Preço": "Sinal de mercado usado para antecipar ou postergar compra.",
+    "Termômetro Preço": "Leitura regional combinando Brent, dólar e pesquisa diária de notícias.",
+    "Orientação Estoque": "Ação sugerida para o nível de estoque considerando risco de falta e tendência de preço.",
     "Estratégia de Estoque": "Perfil recomendado entre segurança, normalidade e eficiência de capital.",
     "Prazo Financeiro (dias)": "Prazo médio de boleto/financeiro do posto para esta compra.",
     "Score": "Nota de 0 a 100 que combina risco de falta, oportunidade de preço e logística.",
@@ -1417,6 +1419,50 @@ def classify_daily_news_trend(news_items, market):
     return "NEUTRA"
 
 
+def price_temperature_signal(market_trend, daily_research=None):
+    daily_trend = (daily_research or {}).get("trend", "NEUTRA")
+    score = 0
+    for signal in [market_trend, daily_trend]:
+        if signal == "ALTA":
+            score += 2
+        elif signal == "BAIXA":
+            score -= 2
+    if score >= 3:
+        return {
+            "level": "Muito quente",
+            "trend": "ALTA",
+            "stock_orientation": "Manter estoque alto nos produtos com giro e espaço de tanque",
+            "decision_note": "Preço com pressão de alta: antecipar compra pesa mais que prazo financeiro.",
+        }
+    if score > 0:
+        return {
+            "level": "Quente",
+            "trend": "ALTA",
+            "stock_orientation": "Antecipar produtos com cobertura curta ou giro alto",
+            "decision_note": "Sinal de alta moderado: comprar antes se houver espaço e risco operacional.",
+        }
+    if score <= -3:
+        return {
+            "level": "Muito frio",
+            "trend": "BAIXA",
+            "stock_orientation": "Esperar queda quando houver cobertura; comprar apenas segurança",
+            "decision_note": "Preço com pressão de baixa: evitar estoque alto se não houver risco de falta.",
+        }
+    if score < 0:
+        return {
+            "level": "Frio",
+            "trend": "BAIXA",
+            "stock_orientation": "Reduzir compra ao mínimo seguro enquanto aguarda queda",
+            "decision_note": "Sinal de baixa moderado: adiar se a cobertura permitir.",
+        }
+    return {
+        "level": "Morno",
+        "trend": "NEUTRA",
+        "stock_orientation": "Comprar pelo risco de falta e giro, sem antecipação especulativa",
+        "decision_note": "Mercado estável: decisão deve seguir cobertura, logística e boleto.",
+    }
+
+
 def fetch_daily_trend_research():
     market = get_market_data()
     queries = [
@@ -1608,7 +1654,9 @@ def purchase_score(coverage, reorder_point_days, trend, reason, payment_term_day
     return round(min(risk_score + price_score + logistics_score + finance_score, 100), 0)
 
 
-def purchase_recommendation(row, trend=None):
+def purchase_recommendation(row, trend=None, price_signal=None):
+    price_signal = price_signal or price_temperature_signal(trend or "NEUTRA")
+    effective_price_trend = price_signal.get("trend", trend or "NEUTRA")
     capacity = float(row["Capacidade (L)"])
     stock = float(row["Estoque Atual (L)"])
     vmd = float(row["VMD (L/dia)"])
@@ -1622,25 +1670,25 @@ def purchase_recommendation(row, trend=None):
     reorder_point_days = lead_time_days + safety_days
     strategy = stock_strategy(coverage, adjusted_vmd, capacity)
     target_days = strategy_target_days(strategy, consumption_trend)
-    if trend == "ALTA":
+    if effective_price_trend == "ALTA":
         target_days = min(max(target_days + 2, 5), 7)
-    elif trend == "BAIXA":
+    elif effective_price_trend == "BAIXA":
         target_days = max(target_days - 1, 3)
     days_until_buy = max(math.floor(coverage - reorder_point_days), 0)
 
     shortage_risk = coverage <= reorder_point_days
-    price_opportunity = trend == "ALTA" and coverage <= target_days + 1 and headroom >= TRUCK_COMPARTMENT_LITERS
+    price_opportunity = effective_price_trend == "ALTA" and coverage <= target_days + 1 and headroom >= TRUCK_COMPARTMENT_LITERS
     should_buy = shortage_risk or price_opportunity
     if not should_buy:
         finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
-        if trend == "BAIXA":
+        if effective_price_trend == "BAIXA":
             action = (
-                f"Aguardar provável baixa de preço; cobertura suficiente para {coverage:.1f} dia(s). "
-                f"Reavaliar em {days_until_buy} dia(s).{finance_note}"
+                f"{price_signal['stock_orientation']}; cobertura suficiente para {coverage:.1f} dia(s). "
+                f"Reavaliar em {days_until_buy} dia(s). {price_signal['decision_note']}{finance_note}"
             )
             reason = "Aguardar baixa provável"
         else:
-            action = f"Não comprar agora; cobertura suficiente. Reavaliar em {days_until_buy} dia(s).{finance_note}"
+            action = f"Não comprar agora; cobertura suficiente. Reavaliar em {days_until_buy} dia(s). {price_signal['decision_note']}{finance_note}"
             reason = "Cobertura suficiente"
         return {
             "volume": 0,
@@ -1652,7 +1700,9 @@ def purchase_recommendation(row, trend=None):
             "when": f"Em {days_until_buy} dia(s)",
             "reason": reason,
             "window": "Sem compra agora; cobertura permite aguardar",
-            "score": purchase_score(coverage, reorder_point_days, trend, reason, payment_term_days, 0),
+            "price_level": price_signal["level"],
+            "stock_orientation": price_signal["stock_orientation"],
+            "score": purchase_score(coverage, reorder_point_days, effective_price_trend, reason, payment_term_days, 0),
         }
 
     balanced_target_days = proportional_target_days(row, adjusted_vmd, target_days)
@@ -1674,10 +1724,12 @@ def purchase_recommendation(row, trend=None):
             "when": "Reavaliar",
             "reason": "Sem lote logístico",
             "window": "Sem compra programada",
-            "score": purchase_score(coverage, reorder_point_days, trend, "Sem lote logístico", payment_term_days, 0),
+            "price_level": price_signal["level"],
+            "stock_orientation": price_signal["stock_orientation"],
+            "score": purchase_score(coverage, reorder_point_days, effective_price_trend, "Sem lote logístico", payment_term_days, 0),
         }
 
-    if shortage_risk and trend == "BAIXA":
+    if shortage_risk and effective_price_trend == "BAIXA":
         reason = "Comprar mínimo e aguardar baixa"
     elif shortage_risk:
         reason = "Risco de falta"
@@ -1685,9 +1737,9 @@ def purchase_recommendation(row, trend=None):
         reason = "Alta prevista: comprar antes do aumento"
     finance_note = f" Prazo financeiro: {payment_term_days} dia(s)." if payment_term_days else ""
     if reason == "Comprar mínimo e aguardar baixa":
-        action = f"{reason}. Comprar só segurança logística para não faltar e esperar preço melhor.{finance_note}"
+        action = f"{reason}. Comprar só segurança logística para não faltar e esperar preço melhor. {price_signal['decision_note']}{finance_note}"
     else:
-        action = f"{reason}. Comprar para repor até {target_days} dia(s) de cobertura ajustada.{finance_note}"
+        action = f"{reason}. Comprar para repor até {target_days} dia(s) de cobertura ajustada. {price_signal['decision_note']}{finance_note}"
     return {
         "volume": rounded_volume,
         "action": action,
@@ -1698,9 +1750,10 @@ def purchase_recommendation(row, trend=None):
         "when": "Hoje",
         "reason": reason,
         "window": window["window"],
-        "score": purchase_score(coverage, reorder_point_days, trend, reason, payment_term_days, rounded_volume),
+        "price_level": price_signal["level"],
+        "stock_orientation": price_signal["stock_orientation"],
+        "score": purchase_score(coverage, reorder_point_days, effective_price_trend, reason, payment_term_days, rounded_volume),
     }
-
 
 def weekly_priority(autonomy, volume):
     if autonomy < 2:
@@ -1835,9 +1888,10 @@ def build_executive_table(df, trend):
     if df.empty:
         return pd.DataFrame()
 
+    price_signal = price_temperature_signal(trend, get_daily_trend_research())
     rows = []
     for _, row in df.iterrows():
-        recommendation = purchase_recommendation(row, trend)
+        recommendation = purchase_recommendation(row, trend, price_signal)
         rows.append(
             {
                 "Posto": row["Posto"],
@@ -1847,6 +1901,8 @@ def build_executive_table(df, trend):
                 "Cobertura (dias)": round(float(recommendation["coverage"]), 1),
                 "Tendência Consumo": recommendation["trend"],
                 "Tendência Preço": {"ALTA": "Alta", "BAIXA": "Queda", "NEUTRA": "Estável"}.get(trend, "Estável"),
+                "Termômetro Preço": recommendation["price_level"],
+                "Orientação Estoque": recommendation["stock_orientation"],
                 "Estratégia de Estoque": recommendation["strategy"],
                 "Prazo Financeiro (dias)": int(row.get("Prazo Financeiro (dias)", 0)),
                 "Score": recommendation["score"],
@@ -2756,6 +2812,8 @@ def project_loading_schedule(df, trend, days_ahead=4):
     end = start + timedelta(days=days_ahead - 1)
     period_days = [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
     future_orders, _ = active_future_orders_lookup(start=start, end=end)
+    price_signal = price_temperature_signal(trend, get_daily_trend_research())
+    effective_price_trend = price_signal["trend"]
     rows = []
     if df.empty:
         return pd.DataFrame(rows)
@@ -2791,16 +2849,16 @@ def project_loading_schedule(df, trend, days_ahead=4):
             reorder_point_days = lead_time_days + safety_days
             strategy = stock_strategy(coverage, adjusted_vmd, capacity)
             target_days = strategy_target_days(strategy, item["consumption_trend"])
-            if trend == "ALTA":
+            if effective_price_trend == "ALTA":
                 target_days = min(max(target_days + 2, 5), 7)
-            elif trend == "BAIXA":
+            elif effective_price_trend == "BAIXA":
                 target_days = max(target_days - 1, 3)
 
             shortage_risk = coverage <= reorder_point_days
-            price_opportunity = trend == "ALTA" and coverage <= target_days + 1
+            price_opportunity = effective_price_trend == "ALTA" and coverage <= target_days + 1
             headroom = max(capacity - stock, 0)
             if shortage_risk or price_opportunity:
-                if trend == "BAIXA" and shortage_risk:
+                if effective_price_trend == "BAIXA" and shortage_risk:
                     target_stock = min(capacity, adjusted_vmd * reorder_point_days)
                     reason = "Comprar minimo e aguardar baixa"
                 elif shortage_risk:
@@ -2812,7 +2870,7 @@ def project_loading_schedule(df, trend, days_ahead=4):
                 next_day = day + timedelta(days=1)
                 can_delay_for_finance = (
                     not shortage_risk
-                    and trend != "ALTA"
+                    and effective_price_trend != "ALTA"
                     and next_day <= end
                     and next_day.weekday() != 6
                     and payment_weekend_gain(next_day, item["payment_term_days"]) > payment_weekend_gain(day, item["payment_term_days"])
@@ -3471,6 +3529,7 @@ def render_sidebar():
             "Pedidos Vibra": "Painel de Carregamentos",
             "Estoque": "Medição de Estoque",
             "Programação": "Programação Operacional",
+            "Central IA": "Central de Decisão IA",
             "Análises": "Análises",
             "Assistente IA": "Assistente IA",
             "Cadastros": "Cadastros",
@@ -4155,6 +4214,63 @@ def render_ai_assistant_page(read_only=False):
         st.write(answer)
 
 
+def render_ai_decision_center(read_only=False):
+    header(
+        "Central de Decisão IA",
+        "A IA prepara as decisões. O usuário confirma, adia ou encaminha para transporte.",
+    )
+    df, market, trend, exec_df, weekly_schedule, _ = purchase_context(read_only)
+    price_signal = price_temperature_signal(trend, get_daily_trend_research())
+    buy_df = exec_df[(exec_df["Comprar?"] == "Sim") & (exec_df["Volume"] >= TRUCK_COMPARTMENT_LITERS)].copy()
+    critical_df = buy_df[(buy_df["Motivo"] == "Risco de falta") | (buy_df["Score"] >= 75)].copy()
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("P1 risco de falta", len(critical_df))
+    c2.metric("Compras sugeridas", len(buy_df))
+    c3.metric("Termômetro", price_signal["level"])
+    c4.metric("Volume sugerido", liters(buy_df["Volume"].sum() if not buy_df.empty else 0))
+
+    st.info(
+        f"Hierarquia ativa: P1 não faltar produto. P2 preço: {price_signal['stock_orientation']}. "
+        "P3 prazo financeiro/boleto somente quando não conflitar com P1 e P2."
+    )
+
+    a1, a2, a3 = st.columns(3)
+    if a1.button("Aprovar somente críticos", type="primary", use_container_width=True, disabled=weekly_schedule.empty):
+        critical_schedule = weekly_schedule[weekly_schedule["Score"] >= 75].copy()
+        approved = approve_schedule_orders(critical_schedule, 7)
+        st.success(f"{approved} item(ns) crítico(s) aprovado(s).")
+        st.rerun()
+    if a2.button("Aprovar programação sugerida", use_container_width=True, disabled=weekly_schedule.empty):
+        approved = approve_schedule_orders(weekly_schedule, 7)
+        st.success(f"{approved} item(ns) aprovado(s).")
+        st.rerun()
+    if a3.button("Abrir transporte", use_container_width=True):
+        st.session_state.force_page = "Programação Operacional"
+        st.rerun()
+
+    st.markdown("#### Decisões preparadas")
+    if buy_df.empty:
+        st.success("Nenhuma compra necessária agora. Manter monitoramento de preço e estoque.")
+        return
+
+    for _, row in buy_df.sort_values(["Score", "Cobertura (dias)"], ascending=[False, True]).head(12).iterrows():
+        style = station_style(row["Posto"])
+        risk_label = "P1 - NÃO FALTAR" if row["Motivo"] == "Risco de falta" else "P2 - PREÇO" if "Alta" in str(row["Motivo"]) else "Operacional"
+        st.markdown(
+            f"""
+            <div class="mobile-summary-card" style="background:{style["bg"]}; border-color:{style["border"]}; border-left:5px solid {style["accent"]};">
+                <h4>{html_lib.escape(row["Posto"])} · {html_lib.escape(row["Produto"])}</h4>
+                <p><b>{risk_label}</b> · <b>Volume:</b> {liters(row["Volume"])} · <b>Score:</b> {row["Score"]:.0f}</p>
+                <p><b>Cobertura:</b> {row["Cobertura (dias)"]:.1f} dias · <b>Termômetro:</b> {html_lib.escape(str(row.get("Termômetro Preço", price_signal["level"])))}</p>
+                <p><b>Orientação:</b> {html_lib.escape(str(row.get("Orientação Estoque", price_signal["stock_orientation"])))}</p>
+                <p><b>Motivo:</b> {html_lib.escape(str(row["Motivo"]))}</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+
 def render_admin_hub():
     header("Cadastros", "Administre postos, tanques, vendas, usuários e integrações.")
     tab_network, tab_settings = st.tabs(["Postos e Tanques", "Configurações"])
@@ -4666,6 +4782,8 @@ def main():
         render_measurement_page(read_only=False)
     elif page == "Programação Operacional":
         render_programming_hub(read_only=False)
+    elif page == "Central de Decisão IA":
+        render_ai_decision_center(read_only=False)
     elif page == "Análises":
         render_analysis_hub(read_only=False)
     elif page == "Assistente IA":
